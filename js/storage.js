@@ -366,18 +366,37 @@ export function deleteLibraryExercise(id) {
 // Backup / restore (used by FEAT-006)
 // =============================================================================
 
+// Pure validation of a parsed backup object. Returns true only when the object
+// has the expected v2 backup shape: a sessions array, a routine object that
+// carries a splitCycle array and a splits object, and an exerciseLibrary array.
+// Kept pure (no localStorage) so it can be unit-tested in node and reused by the
+// import UI to reject malformed files BEFORE overwriting existing data.
+export function isValidBackup(obj) {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  if (!Array.isArray(obj.sessions)) return false;
+  const routine = obj.routine;
+  if (!routine || typeof routine !== 'object' || Array.isArray(routine)) return false;
+  if (!Array.isArray(routine.splitCycle)) return false;
+  if (!routine.splits || typeof routine.splits !== 'object' || Array.isArray(routine.splits)) {
+    return false;
+  }
+  if (!Array.isArray(obj.exerciseLibrary)) return false;
+  return true;
+}
+
 // Export the full persisted blob as a JSON string for backup.
 export function exportData() {
   return JSON.stringify(readBlob(), null, 2);
 }
 
-// Import a previously exported JSON string, replacing the persisted blob.
-// Returns true on success. Runs the parsed data through migration so partial
-// backups still yield a valid v2 shape.
+// Import a previously exported backup, REPLACING the persisted blob. Accepts a
+// JSON string or an already-parsed object. Validates the shape via
+// isValidBackup BEFORE overwriting, so malformed input never corrupts existing
+// data. Returns true on success, false on parse/validation/write failure.
 export function importData(json) {
   try {
     const parsed = typeof json === 'string' ? JSON.parse(json) : json;
-    if (!parsed || typeof parsed !== 'object') return false;
+    if (!isValidBackup(parsed)) return false;
     return writeBlob(migrateBlob(parsed));
   } catch (err) {
     return false;

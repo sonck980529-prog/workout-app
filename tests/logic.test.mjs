@@ -39,6 +39,8 @@ import {
 
 import { validateExerciseInput } from '../js/app.js';
 
+import { isValidBackup } from '../js/storage.js';
+
 let passed = 0;
 function ok(label, fn) {
   try {
@@ -438,6 +440,70 @@ ok('defaults defaultWeightKg to 0 when blank and treats perLeg as boolean', () =
   assert.equal(res.valid, true);
   assert.equal(res.value.defaultWeightKg, 0);
   assert.equal(res.value.perLeg, false);
+});
+
+console.log('storage.js — isValidBackup (FEAT-006, pure)');
+
+// Build a well-formed backup object from the pure default helpers.
+function validBackup() {
+  return {
+    schemaVersion: 2,
+    sessions: [],
+    routine: getDefaultRoutine(),
+    exerciseLibrary: getDefaultExerciseLibrary(),
+  };
+}
+
+ok('accepts a well-formed backup blob', () => {
+  assert.equal(isValidBackup(validBackup()), true);
+});
+
+ok('accepts a backup with logged sessions', () => {
+  const b = validBackup();
+  b.sessions.push({ id: 's1', date: '2024-01-01', splitId: 'chest_back', entriesByExercise: {} });
+  assert.equal(isValidBackup(b), true);
+});
+
+ok('rejects null / non-object / array input', () => {
+  assert.equal(isValidBackup(null), false);
+  assert.equal(isValidBackup(undefined), false);
+  assert.equal(isValidBackup('{}'), false);
+  assert.equal(isValidBackup(42), false);
+  assert.equal(isValidBackup([]), false);
+});
+
+ok('rejects a blob missing the sessions array', () => {
+  const b = validBackup();
+  delete b.sessions;
+  assert.equal(isValidBackup(b), false);
+  b.sessions = {};
+  assert.equal(isValidBackup(b), false);
+});
+
+ok('rejects a blob whose routine lacks splitCycle or splits', () => {
+  const noRoutine = validBackup();
+  delete noRoutine.routine;
+  assert.equal(isValidBackup(noRoutine), false);
+
+  const noCycle = validBackup();
+  delete noCycle.routine.splitCycle;
+  assert.equal(isValidBackup(noCycle), false);
+
+  const noSplits = validBackup();
+  delete noSplits.routine.splits;
+  assert.equal(isValidBackup(noSplits), false);
+
+  const badSplits = validBackup();
+  badSplits.routine.splits = [];
+  assert.equal(isValidBackup(badSplits), false);
+});
+
+ok('rejects a blob missing the exerciseLibrary array', () => {
+  const b = validBackup();
+  delete b.exerciseLibrary;
+  assert.equal(isValidBackup(b), false);
+  b.exerciseLibrary = {};
+  assert.equal(isValidBackup(b), false);
 });
 
 console.log(`\nAll ${passed} assertions passed.`);

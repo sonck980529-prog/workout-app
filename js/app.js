@@ -30,6 +30,9 @@ import {
   addLibraryExercise,
   updateLibraryExercise,
   deleteLibraryExercise,
+  exportData,
+  importData,
+  isValidBackup,
 } from './storage.js';
 import {
   goalVsActual,
@@ -271,26 +274,50 @@ function runningMarkup() {
     </div>`;
 }
 
-function renderToday() {
+// renderToday accepts an optional splitId override for MANUAL split selection.
+// When omitted, it defaults to the auto-rotation next split (getNextSplitId()).
+// A manual selection only changes which split the view shows/logs under; it does
+// NOT change rotation state (rotation still advances from the last SAVED session
+// per getNextSplitId semantics).
+function renderToday(overrideSplitId) {
   const view = document.getElementById('view-today');
   if (!view) return;
 
-  const splitId = getNextSplitId();
-  const split = getSplitPersisted(splitId);
+  const autoSplitId = getNextSplitId();
+  const splits = getSplitsPersisted();
+  // Use the override only when it resolves to a real split; otherwise auto.
+  const requested = overrideSplitId && getSplitPersisted(overrideSplitId)
+    ? overrideSplitId
+    : autoSplitId;
+  const split = getSplitPersisted(requested);
 
   if (!split) {
     view.innerHTML = `<div class="card"><p class="status-danger">루틴 정보를 불러오지 못했습니다.</p></div>`;
     return;
   }
 
+  const splitId = split.id;
   const isRunning = split.type === 'running';
   const exercisesMarkup = isRunning
     ? runningMarkup()
     : split.exercises.map(strengthExerciseMarkup).join('');
 
+  const pickerOptions = splits
+    .map((s) => {
+      const isAuto = s.id === autoSplitId ? ' (자동 순서)' : '';
+      const selected = s.id === splitId ? ' selected' : '';
+      return `<option value="${esc(s.id)}"${selected}>${esc(s.name)}${isAuto}</option>`;
+    })
+    .join('');
+
   view.innerHTML = `
     <div class="card">
       <h2>오늘 훈련 · <span class="split-name">${esc(split.name)}</span></h2>
+      <label class="field field--block">
+        <span class="field-label">분할 선택</span>
+        <select id="today-split">${pickerOptions}</select>
+      </label>
+      <p class="muted split-picker-note">기본값은 자동 로테이션 순서입니다. 다른 분할을 골라 오늘 훈련할 수 있으며, 저장 후 다음 순서는 저장된 세션을 기준으로 자동 진행됩니다.</p>
       <label class="field field--block">
         <span class="field-label">날짜</span>
         <input type="date" id="today-date" value="${todayIso()}" />
@@ -306,6 +333,13 @@ function renderToday() {
 
   view.dataset.splitId = splitId;
   wireTodayEvents(view, split);
+
+  // Manual split picker: re-render the today view for the chosen split without
+  // touching rotation state.
+  const picker = view.querySelector('#today-split');
+  if (picker) {
+    picker.addEventListener('change', () => renderToday(picker.value));
+  }
 }
 
 // Read strength entries out of one exercise card's inputs.
@@ -1235,9 +1269,20 @@ function renderRoutine() {
       <p class="muted">운동 추가 시 여기에서 선택해 빠르게 채울 수 있습니다.</p>
       <ul class="library-list">${libraryMarkup}</ul>
       <button type="button" class="btn" id="lib-add-btn">+ 라이브러리에 추가</button>
+    </div>
+    <div class="card routine-backup">
+      <h3>설정 / 백업</h3>
+      <p class="muted">모든 기록·루틴·운동 라이브러리를 JSON 파일로 내보내고 다시 가져올 수 있습니다. 기기 이전이나 브라우저 데이터 삭제에 대비해 백업하세요. 가져오기는 현재 데이터를 덮어씁니다.</p>
+      <div class="routine-backup-actions">
+        <button type="button" class="btn btn-primary" id="export-data-btn">내보내기</button>
+        <label class="btn" id="import-data-label" for="import-data-input">가져오기</label>
+        <input type="file" id="import-data-input" accept=".json,application/json" hidden />
+      </div>
+      <p class="routine-backup-status muted" id="backup-status" aria-live="polite"></p>
     </div>`;
 
   wireRoutineEvents(view);
+  wireBackupEvents(view);
 }
 
 // Close any inline form already open within a container element.
@@ -1402,6 +1447,82 @@ function wireRoutineEvents(view) {
       });
     }
   });
+}
+
+// Wire the backup/restore controls (export download + import from file).
+function wireBackupEvents(view) {
+  const statusEl = view.querySelector('#backup-status');
+
+  const exportBtn = view.querySelector('#export-data-btn');
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      try {
+        const json = exportData();
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `htracker-backup-${todayIso()}.json`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        // Release the object URL after the download has kicked off.
+        setTimeout(() => URL.revokeObjectURL(url), 0);
+        setBackupStatus(statusEl, '백업 파일을 내보냈습니다.', false);
+      } catch (err) {
+        setBackupStatus(statusEl, '내보내기에 실패했습니다.', true);
+      }
+    });
+  }
+
+  const importInput = view.querySelector('#import-data-input');
+  if (importInput) {
+    importInput.addEventListener('change', () => {
+      const file = importInput.files && importInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        let parsed;
+        try {
+          parsed = JSON.parse(String(reader.result));
+        } catch (err) {
+          setBackupStatus(statusEl, '올바른 JSON 파일이 아닙니다.', true);
+          importInput.value = '';
+          return;
+        }
+        if (!isValidBackup(parsed)) {
+          setBackupStatus(statusEl, '백업 파일 형식이 올바르지 않습니다. 기존 데이터는 그대로 유지됩니다.', true);
+          importInput.value = '';
+          return;
+        }
+        const ok = importData(parsed);
+        importInput.value = '';
+        if (!ok) {
+          setBackupStatus(statusEl, '가져오기에 실패했습니다. 기존 데이터는 그대로 유지됩니다.', true);
+          return;
+        }
+        // Success: re-render every view so restored data shows immediately.
+        renderToday();
+        renderHistory();
+        renderTrends();
+        renderRoutine();
+        // renderRoutine rebuilt this section, so re-query the status element.
+        const freshStatus = document.querySelector('#backup-status');
+        setBackupStatus(freshStatus, '데이터를 가져와 복원했습니다.', false);
+      };
+      reader.onerror = () => {
+        setBackupStatus(statusEl, '파일을 읽지 못했습니다.', true);
+        importInput.value = '';
+      };
+      reader.readAsText(file);
+    });
+  }
+}
+
+function setBackupStatus(el, msg, isError) {
+  if (!el) return;
+  el.textContent = msg;
+  el.className = isError ? 'routine-backup-status status-danger' : 'routine-backup-status status-ok';
 }
 
 // Move a split up (-1) or down (+1) within the cycle and persist.

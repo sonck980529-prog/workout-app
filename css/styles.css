@@ -142,12 +142,26 @@ select {
 
 .nav-btn {
   flex: 1;
+  min-width: 0; /* allow 4 tabs to shrink below content width on ~360px */
   min-height: var(--nav-h);
+  padding: 8px 4px;
   border: none;
   border-radius: 0;
   background: transparent;
   color: var(--text-muted);
-  font-size: 0.95rem;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Narrow phones (~360px and below): tighten so four tabs never overflow. */
+@media (max-width: 380px) {
+  .nav-btn {
+    font-size: 0.8rem;
+    padding: 8px 2px;
+    letter-spacing: -0.02em;
+  }
 }
 
 .nav-btn.is-active {
@@ -581,6 +595,43 @@ select {
 .routine-library #lib-add-btn {
   width: 100%;
   margin-top: 8px;
+}
+
+/* Manual split picker note in 오늘 훈련 */
+.split-picker-note {
+  margin: 8px 0 0;
+  font-size: 0.8rem;
+}
+
+/* 설정/백업 (backup & restore) section */
+.routine-backup-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.routine-backup-actions .btn {
+  flex: 1;
+  min-width: 120px;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* The import control is a <label> styled as a button; keep it consistent. */
+#import-data-label {
+  cursor: pointer;
+}
+
+.routine-backup-status {
+  margin: 12px 0 0;
+  font-size: 0.9rem;
+}
+
+.routine-backup-status:empty {
+  display: none;
 }
 
 /* Wider screens: keep comfortable centered column */
