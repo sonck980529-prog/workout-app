@@ -1,0 +1,9 @@
+# Task planning metadata
+.agents/
+
+# Kiro settings
+.kiro/
+
+# Server logs
+.httpd.log
+*.log
