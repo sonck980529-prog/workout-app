@@ -18,6 +18,18 @@ import {
   getSplitsPersisted,
   getRunPersisted,
   getExercisePersisted,
+  saveSplit,
+  updateSplit,
+  deleteSplit,
+  addExerciseToSplit,
+  updateExercise,
+  deleteExercise,
+  reorderSplitCycle,
+  getSplitCyclePersisted,
+  getExerciseLibrary,
+  addLibraryExercise,
+  updateLibraryExercise,
+  deleteLibraryExercise,
 } from './storage.js';
 import {
   goalVsActual,
@@ -73,6 +85,48 @@ function splitName(splitId) {
 function targetLabel(ex) {
   const perLeg = ex.perLeg ? ' (다리당)' : '';
   return `목표 ${ex.repMin}~${ex.repMax}회 x ${ex.sets}세트${perLeg}`;
+}
+
+// Pure validation for a strength exercise input (used by the 루틴 editor).
+// Accepts raw string/number values; returns { valid, errors: [..], value }
+// where value is the normalized exercise fields on success. Rules: non-empty
+// name; defaultWeightKg is a non-negative number; repMin/repMax/sets are
+// positive integers; repMin <= repMax.
+export function validateExerciseInput(raw) {
+  const errors = [];
+  const name = String(raw && raw.name != null ? raw.name : '').trim();
+  if (!name) errors.push('이름을 입력하세요.');
+
+  const weightNum = Number(raw && raw.defaultWeightKg);
+  const weightKg = Number.isFinite(weightNum) && weightNum >= 0 ? weightNum : 0;
+  if (raw && raw.defaultWeightKg !== '' && raw.defaultWeightKg != null &&
+      (!Number.isFinite(weightNum) || weightNum < 0)) {
+    errors.push('기본 무게는 0 이상의 숫자여야 합니다.');
+  }
+
+  const isPositiveInt = (v) => Number.isInteger(v) && v > 0;
+  const repMin = Number(raw && raw.repMin);
+  const repMax = Number(raw && raw.repMax);
+  const sets = Number(raw && raw.sets);
+  if (!isPositiveInt(repMin)) errors.push('목표 최소 횟수는 1 이상의 정수여야 합니다.');
+  if (!isPositiveInt(repMax)) errors.push('목표 최대 횟수는 1 이상의 정수여야 합니다.');
+  if (!isPositiveInt(sets)) errors.push('세트 수는 1 이상의 정수여야 합니다.');
+  if (isPositiveInt(repMin) && isPositiveInt(repMax) && repMin > repMax) {
+    errors.push('목표 최소 횟수는 최대 횟수보다 클 수 없습니다.');
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    value: {
+      name,
+      defaultWeightKg: weightKg,
+      repMin,
+      repMax,
+      sets,
+      perLeg: !!(raw && raw.perLeg),
+    },
+  };
 }
 
 function statusClass(status) {
@@ -173,13 +227,19 @@ function strengthExerciseMarkup(ex) {
 }
 
 function runningMarkup() {
-  const easy = getRunPersisted('easy');
-  const interval = getRunPersisted('interval');
+  const easy = getRunPersisted('easy') || {};
+  const interval = getRunPersisted('interval') || {};
+  const easyLine = easy.distanceMinKm != null
+    ? `<p class="muted">이지런 ${easy.distanceMinKm}~${easy.distanceMaxKm}km · ${formatPace(easy.paceMinSecPerKm)}~${formatPace(easy.paceMaxSecPerKm)}/km · ${esc(easy.note)}</p>`
+    : '';
+  const intervalLine = interval.distanceMinKm != null
+    ? `<p class="muted">인터벌 ${interval.distanceMinKm}~${interval.distanceMaxKm}km · 반복 구간 ${formatPace(interval.paceMinSecPerKm)}~${formatPace(interval.paceMaxSecPerKm)}/km</p>`
+    : '';
   return `
     <div class="card exercise" data-run="true">
       <h3>러닝</h3>
-      <p class="muted">이지런 ${easy.distanceMinKm}~${easy.distanceMaxKm}km · ${formatPace(easy.paceMinSecPerKm)}~${formatPace(easy.paceMaxSecPerKm)}/km · ${esc(easy.note)}</p>
-      <p class="muted">인터벌 ${interval.distanceMinKm}~${interval.distanceMaxKm}km · 반복 구간 ${formatPace(interval.paceMinSecPerKm)}~${formatPace(interval.paceMaxSecPerKm)}/km</p>
+      ${easyLine}
+      ${intervalLine}
       <label class="field field--block">
         <span class="field-label">유형</span>
         <select class="input-run-type">
@@ -974,6 +1034,453 @@ function renderTrends() {
 }
 
 // =============================================================================
+// 루틴 (Routine & Exercise manager) view — wger-inspired editor (FEAT-005)
+// =============================================================================
+
+// Re-render every view that surfaces routine data after a mutation.
+function refreshAfterRoutineChange() {
+  renderRoutine();
+  renderToday();
+  renderTrends();
+}
+
+// Markup for a single exercise row inside a split card (read + edit/delete).
+function routineExerciseRowMarkup(ex) {
+  return `
+    <li class="routine-ex" data-exercise-id="${esc(ex.id)}">
+      <div class="routine-ex-info">
+        <span class="routine-ex-name">${esc(ex.name)}</span>
+        <span class="muted routine-ex-target">${esc(targetLabel(ex))}${ex.defaultWeightKg ? ` · 기본 ${esc(ex.defaultWeightKg)}kg` : ''}</span>
+      </div>
+      <div class="routine-ex-actions">
+        <button type="button" class="btn ex-edit" aria-label="${esc(ex.name)} 수정">수정</button>
+        <button type="button" class="btn ex-delete" aria-label="${esc(ex.name)} 삭제">삭제</button>
+      </div>
+    </li>`;
+}
+
+// Markup for the running split's read-only run definitions.
+function routineRunningMarkup(split) {
+  const easy = split.runs && split.runs.easy;
+  const interval = split.runs && split.runs.interval;
+  const easyLine = easy
+    ? `<p class="muted">이지런 ${esc(easy.distanceMinKm)}~${esc(easy.distanceMaxKm)}km · ${formatPace(easy.paceMinSecPerKm)}~${formatPace(easy.paceMaxSecPerKm)}/km</p>`
+    : '';
+  const intervalLine = interval
+    ? `<p class="muted">인터벌 ${esc(interval.distanceMinKm)}~${esc(interval.distanceMaxKm)}km · 반복 구간 ${formatPace(interval.paceMinSecPerKm)}~${formatPace(interval.paceMaxSecPerKm)}/km</p>`
+    : '';
+  return `<div class="routine-running">${easyLine}${intervalLine}<p class="muted routine-running-note">러닝 목표는 읽기 전용입니다.</p></div>`;
+}
+
+// The add/edit exercise form fields. `values` pre-fills; `mode` = 'add'|'edit'.
+function exerciseFormMarkup(values, opts = {}) {
+  const v = values || {};
+  const libOptions = opts.showLibrary
+    ? getExerciseLibrary()
+        .map((lib) => `<option value="${esc(lib.id)}">${esc(lib.name)}</option>`)
+        .join('')
+    : '';
+  const librarySelect = opts.showLibrary
+    ? `
+      <label class="field field--block">
+        <span class="field-label">라이브러리에서 선택</span>
+        <select class="ex-lib-select">
+          <option value="">직접 입력 (커스텀)</option>
+          ${libOptions}
+        </select>
+      </label>`
+    : '';
+  const saveToLib = opts.showLibrary
+    ? `
+      <label class="checkbox-field">
+        <input type="checkbox" class="ex-save-to-lib" />
+        <span>이 운동을 라이브러리에도 저장</span>
+      </label>`
+    : '';
+  return `
+    <div class="routine-form">
+      ${librarySelect}
+      <label class="field field--block">
+        <span class="field-label">이름</span>
+        <input type="text" class="ex-name" value="${esc(v.name != null ? v.name : '')}" placeholder="예: 벤치프레스" />
+      </label>
+      <label class="field field--block">
+        <span class="field-label">기본 무게 (kg)</span>
+        <input type="number" inputmode="decimal" step="0.5" min="0" class="ex-weight" value="${esc(v.defaultWeightKg != null ? v.defaultWeightKg : 0)}" />
+      </label>
+      <div class="routine-form-row">
+        <label class="field">
+          <span class="field-label">목표 최소 횟수</span>
+          <input type="number" inputmode="numeric" step="1" min="1" class="ex-repmin" value="${esc(v.repMin != null ? v.repMin : '')}" />
+        </label>
+        <label class="field">
+          <span class="field-label">목표 최대 횟수</span>
+          <input type="number" inputmode="numeric" step="1" min="1" class="ex-repmax" value="${esc(v.repMax != null ? v.repMax : '')}" />
+        </label>
+        <label class="field">
+          <span class="field-label">세트 수</span>
+          <input type="number" inputmode="numeric" step="1" min="1" class="ex-sets" value="${esc(v.sets != null ? v.sets : '')}" />
+        </label>
+      </div>
+      <label class="checkbox-field">
+        <input type="checkbox" class="ex-perleg" ${v.perLeg ? 'checked' : ''} />
+        <span>다리당 (좌우 각각)</span>
+      </label>
+      ${saveToLib}
+      <p class="routine-form-error status-danger" aria-live="polite"></p>
+      <div class="routine-form-actions">
+        <button type="button" class="btn btn-primary ex-form-save">${opts.saveLabel || '저장'}</button>
+        <button type="button" class="btn ex-form-cancel">취소</button>
+      </div>
+    </div>`;
+}
+
+// Read the exercise form fields into a raw object for validation.
+function readExerciseForm(formEl) {
+  return {
+    name: formEl.querySelector('.ex-name').value,
+    defaultWeightKg: formEl.querySelector('.ex-weight').value,
+    repMin: formEl.querySelector('.ex-repmin').value,
+    repMax: formEl.querySelector('.ex-repmax').value,
+    sets: formEl.querySelector('.ex-sets').value,
+    perLeg: formEl.querySelector('.ex-perleg').checked,
+  };
+}
+
+// Markup for one split card in the routine editor.
+function routineSplitMarkup(split, index, total) {
+  const isRunning = split.type === 'running';
+  const typeLabel = isRunning ? '러닝' : '근력';
+  const body = isRunning
+    ? routineRunningMarkup(split)
+    : `
+      <ul class="routine-ex-list">
+        ${(split.exercises || []).map(routineExerciseRowMarkup).join('') || '<li class="muted routine-ex-empty">운동이 없습니다.</li>'}
+      </ul>
+      <button type="button" class="btn ex-add">+ 운동 추가</button>`;
+
+  return `
+    <div class="card routine-split" data-split-id="${esc(split.id)}" data-split-type="${esc(split.type)}">
+      <div class="routine-split-head">
+        <div class="routine-split-title">
+          <span class="routine-split-name">${esc(split.name)}</span>
+          <span class="muted routine-split-type">${esc(typeLabel)} · ${index + 1}/${total}</span>
+        </div>
+        <div class="routine-split-move">
+          <button type="button" class="btn split-up" aria-label="위로 이동" ${index === 0 ? 'disabled' : ''}>▲</button>
+          <button type="button" class="btn split-down" aria-label="아래로 이동" ${index === total - 1 ? 'disabled' : ''}>▼</button>
+        </div>
+      </div>
+      <div class="routine-split-actions">
+        <button type="button" class="btn split-rename">이름 수정</button>
+        <button type="button" class="btn split-delete" ${total <= 1 ? 'disabled' : ''}>분할 삭제</button>
+      </div>
+      ${body}
+    </div>`;
+}
+
+// Library management section markup.
+function libraryItemMarkup(lib) {
+  return `
+    <li class="library-item" data-lib-id="${esc(lib.id)}">
+      <div class="routine-ex-info">
+        <span class="routine-ex-name">${esc(lib.name)}</span>
+        <span class="muted routine-ex-target">${esc(targetLabel(lib))}${lib.defaultWeightKg ? ` · 기본 ${esc(lib.defaultWeightKg)}kg` : ''}</span>
+      </div>
+      <div class="routine-ex-actions">
+        <button type="button" class="btn lib-edit" aria-label="${esc(lib.name)} 수정">수정</button>
+        <button type="button" class="btn lib-delete" aria-label="${esc(lib.name)} 삭제">삭제</button>
+      </div>
+    </li>`;
+}
+
+function renderRoutine() {
+  const view = document.getElementById('view-routine');
+  if (!view) return;
+
+  const splits = getSplitsPersisted();
+  const total = splits.length;
+  const splitsMarkup = splits
+    .map((split, i) => routineSplitMarkup(split, i, total))
+    .join('');
+
+  const library = getExerciseLibrary();
+  const libraryMarkup = library.map(libraryItemMarkup).join('') ||
+    '<li class="muted routine-ex-empty">라이브러리가 비어 있습니다.</li>';
+
+  view.innerHTML = `
+    <div class="card">
+      <h2>루틴 관리</h2>
+      <p class="muted">분할과 운동을 편집하고 로테이션 순서를 조정할 수 있습니다. 변경 사항은 자동 저장됩니다.</p>
+    </div>
+    ${splitsMarkup}
+    <div class="card routine-add-split">
+      <h3>분할 추가</h3>
+      <label class="field field--block">
+        <span class="field-label">분할 이름</span>
+        <input type="text" id="new-split-name" placeholder="예: 팔·복근" />
+      </label>
+      <label class="field field--block">
+        <span class="field-label">유형</span>
+        <select id="new-split-type">
+          <option value="strength">근력</option>
+          <option value="running">러닝</option>
+        </select>
+      </label>
+      <p class="routine-form-error status-danger" id="new-split-error" aria-live="polite"></p>
+      <button type="button" class="btn btn-primary" id="add-split-btn">+ 분할 추가</button>
+    </div>
+    <div class="card routine-library">
+      <h3>운동 라이브러리</h3>
+      <p class="muted">운동 추가 시 여기에서 선택해 빠르게 채울 수 있습니다.</p>
+      <ul class="library-list">${libraryMarkup}</ul>
+      <button type="button" class="btn" id="lib-add-btn">+ 라이브러리에 추가</button>
+    </div>`;
+
+  wireRoutineEvents(view);
+}
+
+// Close any inline form already open within a container element.
+function removeInlineForm(container) {
+  const existing = container.querySelector('.routine-form');
+  if (existing) existing.remove();
+}
+
+// Populate an exercise form's fields from a library exercise (pre-fill).
+function prefillFormFromLibrary(formEl, lib) {
+  if (!lib) return;
+  formEl.querySelector('.ex-name').value = lib.name != null ? lib.name : '';
+  formEl.querySelector('.ex-weight').value = lib.defaultWeightKg != null ? lib.defaultWeightKg : 0;
+  formEl.querySelector('.ex-repmin').value = lib.repMin != null ? lib.repMin : '';
+  formEl.querySelector('.ex-repmax').value = lib.repMax != null ? lib.repMax : '';
+  formEl.querySelector('.ex-sets').value = lib.sets != null ? lib.sets : '';
+  formEl.querySelector('.ex-perleg').checked = !!lib.perLeg;
+}
+
+// Wire the save/cancel + validation lifecycle of an exercise form. `onSave`
+// receives the validated value plus the form element (for library options).
+function wireExerciseForm(formEl, onSave) {
+  const errEl = formEl.querySelector('.routine-form-error');
+  const libSelect = formEl.querySelector('.ex-lib-select');
+  if (libSelect) {
+    libSelect.addEventListener('change', () => {
+      const lib = getExerciseLibrary().find((l) => l.id === libSelect.value);
+      if (lib) prefillFormFromLibrary(formEl, lib);
+    });
+  }
+  formEl.querySelector('.ex-form-cancel').addEventListener('click', () => formEl.remove());
+  formEl.querySelector('.ex-form-save').addEventListener('click', () => {
+    const result = validateExerciseInput(readExerciseForm(formEl));
+    if (!result.valid) {
+      if (errEl) errEl.textContent = result.errors.join(' ');
+      return;
+    }
+    if (errEl) errEl.textContent = '';
+    const saveToLib = formEl.querySelector('.ex-save-to-lib');
+    onSave(result.value, { saveToLibrary: saveToLib ? saveToLib.checked : false });
+  });
+}
+
+function wireRoutineEvents(view) {
+  // --- Per-split controls ---
+  view.querySelectorAll('.routine-split').forEach((card) => {
+    const splitId = card.dataset.splitId;
+    const isRunning = card.dataset.splitType === 'running';
+
+    const upBtn = card.querySelector('.split-up');
+    const downBtn = card.querySelector('.split-down');
+    if (upBtn) upBtn.addEventListener('click', () => moveSplit(splitId, -1));
+    if (downBtn) downBtn.addEventListener('click', () => moveSplit(splitId, 1));
+
+    const renameBtn = card.querySelector('.split-rename');
+    if (renameBtn) renameBtn.addEventListener('click', () => openSplitRename(card, splitId));
+
+    const delBtn = card.querySelector('.split-delete');
+    if (delBtn && !delBtn.disabled) {
+      delBtn.addEventListener('click', () => {
+        const split = getSplitPersisted(splitId);
+        const name = split ? split.name : '';
+        if (getSplitsPersisted().length <= 1) return; // guard: last split
+        if (window.confirm(`'${name}' 분할을 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) {
+          deleteSplit(splitId);
+          refreshAfterRoutineChange();
+        }
+      });
+    }
+
+    if (!isRunning) {
+      const addBtn = card.querySelector('.ex-add');
+      if (addBtn) {
+        addBtn.addEventListener('click', () => openAddExercise(card, splitId));
+      }
+
+      card.querySelectorAll('.routine-ex').forEach((row) => {
+        const exId = row.dataset.exerciseId;
+        const editBtn = row.querySelector('.ex-edit');
+        const delExBtn = row.querySelector('.ex-delete');
+        if (editBtn) editBtn.addEventListener('click', () => openEditExercise(row, splitId, exId));
+        if (delExBtn) {
+          delExBtn.addEventListener('click', () => {
+            const ex = getExercisePersisted(exId);
+            const name = ex ? ex.name : '';
+            if (window.confirm(`'${name}' 운동을 삭제할까요?`)) {
+              deleteExercise(splitId, exId);
+              refreshAfterRoutineChange();
+            }
+          });
+        }
+      });
+    }
+  });
+
+  // --- Add split ---
+  const addSplitBtn = view.querySelector('#add-split-btn');
+  if (addSplitBtn) {
+    addSplitBtn.addEventListener('click', () => {
+      const nameEl = view.querySelector('#new-split-name');
+      const typeEl = view.querySelector('#new-split-type');
+      const errEl = view.querySelector('#new-split-error');
+      const name = (nameEl.value || '').trim();
+      if (!name) {
+        if (errEl) errEl.textContent = '분할 이름을 입력하세요.';
+        return;
+      }
+      if (errEl) errEl.textContent = '';
+      const type = typeEl.value === 'running' ? 'running' : 'strength';
+      const split = type === 'running'
+        ? { name, type: 'running', runs: {} }
+        : { name, type: 'strength', exercises: [] };
+      saveSplit(split);
+      refreshAfterRoutineChange();
+    });
+  }
+
+  // --- Library management ---
+  const libAddBtn = view.querySelector('#lib-add-btn');
+  if (libAddBtn) {
+    libAddBtn.addEventListener('click', () => {
+      const section = view.querySelector('.routine-library');
+      removeInlineForm(section);
+      const holder = document.createElement('div');
+      holder.innerHTML = exerciseFormMarkup({ defaultWeightKg: 0 }, { saveLabel: '라이브러리에 추가' });
+      const formEl = holder.firstElementChild;
+      section.appendChild(formEl);
+      wireExerciseForm(formEl, (value) => {
+        addLibraryExercise(value);
+        renderRoutine();
+      });
+    });
+  }
+
+  view.querySelectorAll('.library-item').forEach((row) => {
+    const libId = row.dataset.libId;
+    const editBtn = row.querySelector('.lib-edit');
+    const delBtn = row.querySelector('.lib-delete');
+    if (editBtn) {
+      editBtn.addEventListener('click', () => {
+        const lib = getExerciseLibrary().find((l) => l.id === libId);
+        if (!lib) return;
+        removeInlineForm(row.closest('.routine-library'));
+        const holder = document.createElement('div');
+        holder.innerHTML = exerciseFormMarkup(lib, { saveLabel: '수정 저장' });
+        const formEl = holder.firstElementChild;
+        row.insertAdjacentElement('afterend', formEl);
+        wireExerciseForm(formEl, (value) => {
+          updateLibraryExercise(libId, value);
+          renderRoutine();
+        });
+      });
+    }
+    if (delBtn) {
+      delBtn.addEventListener('click', () => {
+        const lib = getExerciseLibrary().find((l) => l.id === libId);
+        const name = lib ? lib.name : '';
+        if (window.confirm(`라이브러리에서 '${name}' 을(를) 삭제할까요?`)) {
+          deleteLibraryExercise(libId);
+          renderRoutine();
+        }
+      });
+    }
+  });
+}
+
+// Move a split up (-1) or down (+1) within the cycle and persist.
+function moveSplit(splitId, delta) {
+  const cycle = getSplitCyclePersisted();
+  const idx = cycle.indexOf(splitId);
+  if (idx === -1) return;
+  const target = idx + delta;
+  if (target < 0 || target >= cycle.length) return;
+  const reordered = [...cycle];
+  const [moved] = reordered.splice(idx, 1);
+  reordered.splice(target, 0, moved);
+  reorderSplitCycle(reordered);
+  refreshAfterRoutineChange();
+}
+
+// Inline split-name rename form.
+function openSplitRename(card, splitId) {
+  if (card.querySelector('.split-rename-form')) return;
+  const split = getSplitPersisted(splitId);
+  if (!split) return;
+  const holder = document.createElement('div');
+  holder.className = 'split-rename-form routine-form';
+  holder.innerHTML = `
+    <label class="field field--block">
+      <span class="field-label">분할 이름</span>
+      <input type="text" class="split-name-input" value="${esc(split.name)}" />
+    </label>
+    <p class="routine-form-error status-danger" aria-live="polite"></p>
+    <div class="routine-form-actions">
+      <button type="button" class="btn btn-primary split-name-save">저장</button>
+      <button type="button" class="btn split-name-cancel">취소</button>
+    </div>`;
+  const head = card.querySelector('.routine-split-actions');
+  head.insertAdjacentElement('afterend', holder);
+  const errEl = holder.querySelector('.routine-form-error');
+  holder.querySelector('.split-name-cancel').addEventListener('click', () => holder.remove());
+  holder.querySelector('.split-name-save').addEventListener('click', () => {
+    const name = (holder.querySelector('.split-name-input').value || '').trim();
+    if (!name) {
+      if (errEl) errEl.textContent = '분할 이름을 입력하세요.';
+      return;
+    }
+    updateSplit(splitId, { name });
+    refreshAfterRoutineChange();
+  });
+}
+
+// Inline add-exercise form (with library pre-fill + optional save-to-library).
+function openAddExercise(card, splitId) {
+  removeInlineForm(card);
+  const holder = document.createElement('div');
+  holder.innerHTML = exerciseFormMarkup({ defaultWeightKg: 0 }, { showLibrary: true, saveLabel: '운동 추가' });
+  const formEl = holder.firstElementChild;
+  card.appendChild(formEl);
+  wireExerciseForm(formEl, (value, meta) => {
+    addExerciseToSplit(splitId, value);
+    if (meta && meta.saveToLibrary) addLibraryExercise(value);
+    refreshAfterRoutineChange();
+  });
+}
+
+// Inline edit-exercise form.
+function openEditExercise(row, splitId, exId) {
+  const ex = getExercisePersisted(exId);
+  if (!ex) return;
+  const card = row.closest('.routine-split');
+  removeInlineForm(card);
+  const holder = document.createElement('div');
+  holder.innerHTML = exerciseFormMarkup(ex, { saveLabel: '수정 저장' });
+  const formEl = holder.firstElementChild;
+  row.insertAdjacentElement('afterend', formEl);
+  wireExerciseForm(formEl, (value) => {
+    updateExercise(splitId, exId, value);
+    refreshAfterRoutineChange();
+  });
+}
+
+// =============================================================================
 // Init
 // =============================================================================
 
@@ -990,6 +1497,7 @@ function init() {
     renderToday();
     renderHistory();
     renderTrends();
+    renderRoutine();
   } catch (err) {
     // Fail soft so a rendering error in one view does not break navigation.
     console.error('렌더링 오류:', err);
@@ -997,4 +1505,7 @@ function init() {
   switchView('view-today');
 }
 
-document.addEventListener('DOMContentLoaded', init);
+// Only wire up when running in a browser (guards node imports for testing).
+if (typeof document !== 'undefined' && document.addEventListener) {
+  document.addEventListener('DOMContentLoaded', init);
+}

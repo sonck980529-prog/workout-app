@@ -37,6 +37,8 @@ import {
   EMPTY_STATE_TEXT,
 } from '../js/charts.js';
 
+import { validateExerciseInput } from '../js/app.js';
+
 let passed = 0;
 function ok(label, fn) {
   try {
@@ -389,6 +391,53 @@ ok('barChartSvg returns an <svg> with bars for 2+ points, empty-state otherwise'
   ]);
   assert.ok(out.includes('<svg'));
   assert.ok(out.includes('chart-bar'));
+});
+
+console.log('app.js — validateExerciseInput (FEAT-005, pure)');
+
+ok('accepts a valid exercise and normalizes fields', () => {
+  const res = validateExerciseInput({
+    name: '  벤치프레스  ',
+    defaultWeightKg: '40',
+    repMin: '6',
+    repMax: '10',
+    sets: '4',
+    perLeg: true,
+  });
+  assert.equal(res.valid, true);
+  assert.deepEqual(res.errors, []);
+  assert.equal(res.value.name, '벤치프레스'); // trimmed
+  assert.equal(res.value.defaultWeightKg, 40);
+  assert.equal(res.value.repMin, 6);
+  assert.equal(res.value.repMax, 10);
+  assert.equal(res.value.sets, 4);
+  assert.equal(res.value.perLeg, true);
+});
+
+ok('rejects an empty name', () => {
+  const res = validateExerciseInput({ name: '   ', repMin: '6', repMax: '10', sets: '4' });
+  assert.equal(res.valid, false);
+  assert.ok(res.errors.some((e) => e.includes('이름')));
+});
+
+ok('rejects non-positive / non-integer rep and set values', () => {
+  assert.equal(validateExerciseInput({ name: 'x', repMin: '0', repMax: '10', sets: '4' }).valid, false);
+  assert.equal(validateExerciseInput({ name: 'x', repMin: '6', repMax: '10', sets: '0' }).valid, false);
+  assert.equal(validateExerciseInput({ name: 'x', repMin: '6.5', repMax: '10', sets: '4' }).valid, false);
+  assert.equal(validateExerciseInput({ name: 'x', repMin: '-3', repMax: '10', sets: '4' }).valid, false);
+});
+
+ok('rejects repMin greater than repMax', () => {
+  const res = validateExerciseInput({ name: 'x', repMin: '12', repMax: '8', sets: '4' });
+  assert.equal(res.valid, false);
+  assert.ok(res.errors.some((e) => e.includes('최대')));
+});
+
+ok('defaults defaultWeightKg to 0 when blank and treats perLeg as boolean', () => {
+  const res = validateExerciseInput({ name: '플랭크', defaultWeightKg: '', repMin: '30', repMax: '60', sets: '3' });
+  assert.equal(res.valid, true);
+  assert.equal(res.value.defaultWeightKg, 0);
+  assert.equal(res.value.perLeg, false);
 });
 
 console.log(`\nAll ${passed} assertions passed.`);
