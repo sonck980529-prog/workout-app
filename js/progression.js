@@ -27,13 +27,16 @@ export const SUGGESTION_TYPE = {
 };
 
 // (a) Rotation: 등·가슴 -> 어깨·하체·복근 -> 러닝 -> 등·가슴
-export function nextSplitId(lastSplitId) {
-  const idx = SPLIT_CYCLE.indexOf(lastSplitId);
+// PURE. The rotation cycle is passed in so a user-edited cycle can drive
+// rotation; it defaults to the hardcoded SPLIT_CYCLE for backward compatibility.
+export function nextSplitId(lastSplitId, cycle = SPLIT_CYCLE) {
+  const order = Array.isArray(cycle) && cycle.length > 0 ? cycle : SPLIT_CYCLE;
+  const idx = order.indexOf(lastSplitId);
   if (idx === -1) {
     // Unknown or no previous split → start at first split of the cycle.
-    return SPLIT_CYCLE[0];
+    return order[0];
   }
-  return SPLIT_CYCLE[(idx + 1) % SPLIT_CYCLE.length];
+  return order[(idx + 1) % order.length];
 }
 
 // (b) True only when every performed set reps >= repMax AND set count >= target sets.
