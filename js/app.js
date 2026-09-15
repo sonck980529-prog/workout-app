@@ -229,9 +229,9 @@ function strengthExerciseMarkup(ex) {
     </div>`;
 }
 
-function runningMarkup() {
-  const easy = getRunPersisted('easy') || {};
-  const interval = getRunPersisted('interval') || {};
+function runningMarkup(splitId) {
+  const easy = getRunPersisted('easy', splitId) || {};
+  const interval = getRunPersisted('interval', splitId) || {};
   const easyLine = easy.distanceMinKm != null
     ? `<p class="muted">이지런 ${easy.distanceMinKm}~${easy.distanceMaxKm}km · ${formatPace(easy.paceMinSecPerKm)}~${formatPace(easy.paceMaxSecPerKm)}/km · ${esc(easy.note)}</p>`
     : '';
@@ -279,6 +279,16 @@ function runningMarkup() {
 // A manual selection only changes which split the view shows/logs under; it does
 // NOT change rotation state (rotation still advances from the last SAVED session
 // per getNextSplitId semantics).
+//
+// NOTE on manual-selection reset: calling renderToday() with no argument (after
+// a save, or from refreshAfterRoutineChange/import) rebuilds the view on the
+// auto split, discarding any manual pick. This is intentional and safe:
+//   - After a save the entered sets are already persisted, so nothing in
+//     progress is lost.
+//   - Routine edits and imports happen from the 루틴 tab, not while the user is
+//     mid-entry in 오늘 훈련, so those re-renders never drop half-entered sets.
+// Switching split via the picker deliberately re-renders (clearing inputs),
+// since sets entered for one split do not carry over to another.
 function renderToday(overrideSplitId) {
   const view = document.getElementById('view-today');
   if (!view) return;
@@ -299,7 +309,7 @@ function renderToday(overrideSplitId) {
   const splitId = split.id;
   const isRunning = split.type === 'running';
   const exercisesMarkup = isRunning
-    ? runningMarkup()
+    ? runningMarkup(splitId)
     : split.exercises.map(strengthExerciseMarkup).join('');
 
   const pickerOptions = splits
@@ -392,11 +402,11 @@ function syncRepPaceVisibility(card) {
 // Update the inline pace evaluation line for the running card.
 // The interval band grades the REP-SEGMENT pace, so interval sessions are
 // evaluated against the rep-segment input; easy runs use the whole-run pace.
-function refreshRunEval(card) {
+function refreshRunEval(card, splitId) {
   const target = card.querySelector('.goal-actual');
   if (!target) return;
   const type = card.querySelector('.input-run-type').value;
-  const runDef = getRunPersisted(type);
+  const runDef = getRunPersisted(type, splitId);
   const wholePaceSec = parsePace(
     card.querySelector('.input-pace-min').value,
     card.querySelector('.input-pace-sec').value
@@ -470,10 +480,10 @@ function wireTodayEvents(view, split) {
     const runCard = view.querySelector('.exercise[data-run="true"]');
     if (runCard) {
       syncRepPaceVisibility(runCard);
-      runCard.addEventListener('input', () => refreshRunEval(runCard));
+      runCard.addEventListener('input', () => refreshRunEval(runCard, split.id));
       runCard.addEventListener('change', () => {
         syncRepPaceVisibility(runCard);
-        refreshRunEval(runCard);
+        refreshRunEval(runCard, split.id);
       });
     }
   }
@@ -524,6 +534,7 @@ function handleSave(view, split) {
     }
   } else {
     const entriesByExercise = {};
+    const exerciseNames = {};
     let anyEntry = false;
     view.querySelectorAll('.exercise').forEach((card) => {
       const exId = card.dataset.exerciseId;
@@ -531,6 +542,9 @@ function handleSave(view, split) {
       const entries = readExerciseEntries(card);
       if (entries.length > 0) {
         entriesByExercise[exId] = entries;
+        // Snapshot the display name from the split in scope at log time.
+        const ex = split.exercises.find((e) => e.id === exId);
+        if (ex && ex.name) exerciseNames[exId] = ex.name;
         anyEntry = true;
       }
     });
@@ -539,6 +553,7 @@ function handleSave(view, split) {
       return;
     }
     session.entriesByExercise = entriesByExercise;
+    session.exerciseNames = exerciseNames;
   }
 
   saveSession(session);
@@ -563,7 +578,7 @@ function sessionSummaryMarkup(session) {
   const name = splitName(session.splitId);
   let body;
   if (session.run) {
-    const runDef = getRunPersisted(session.run.type);
+    const runDef = getRunPersisted(session.run.type, session.splitId);
     const isInterval = session.run.type === 'interval';
     // Grade the rep segment for interval runs; whole-run pace for easy runs.
     const gradedPace = isInterval
@@ -583,7 +598,7 @@ function sessionSummaryMarkup(session) {
   } else if (session.entriesByExercise) {
     body = Object.entries(session.entriesByExercise)
       .map(([exId, entries]) => {
-        const label = exerciseNameFallback(exId);
+        const label = exerciseNameFallback(exId, session.exerciseNames);
         const sets = entries
           .map((e) => `${esc(e.reps)}회${e.weightKg ? `@${esc(e.weightKg)}kg` : ''}`)
           .join(', ');
@@ -607,10 +622,17 @@ function sessionSummaryMarkup(session) {
     </div>`;
 }
 
-// Look up a strength exercise display name by id (falls back to the id itself).
-// Resolves against the persisted routine so custom/edited exercises show
-// their correct names.
-function exerciseNameFallback(exId) {
+// Look up a strength exercise display name by id. Resolution order:
+//   1) the name snapshotted into the session at log time (survives later
+//      renames/deletes of the exercise),
+//   2) the live persisted routine (covers older sessions logged before the
+//      snapshot existed, and reflects a current rename),
+//   3) the raw id as a last resort.
+// `snapshot` is the session's optional { [exId]: name } map.
+function exerciseNameFallback(exId, snapshot) {
+  if (snapshot && typeof snapshot[exId] === 'string' && snapshot[exId]) {
+    return snapshot[exId];
+  }
   const ex = getExercisePersisted(exId);
   return ex ? ex.name : exId;
 }
@@ -691,7 +713,7 @@ function strengthEditorMarkup(session) {
   const entriesByExercise = session.entriesByExercise || {};
   return Object.entries(entriesByExercise)
     .map(([exId, entries]) => {
-      const label = exerciseNameFallback(exId);
+      const label = exerciseNameFallback(exId, session.exerciseNames);
       const rows = entries
         .map((e, i) => editSetRowMarkup(i, e.weightKg != null ? e.weightKg : '', e.reps != null ? e.reps : ''))
         .join('');

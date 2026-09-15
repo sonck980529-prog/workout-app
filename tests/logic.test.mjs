@@ -506,5 +506,53 @@ ok('rejects a blob missing the exerciseLibrary array', () => {
   assert.equal(isValidBackup(b), false);
 });
 
+console.log('storage.js — isValidBackup referential integrity (review fix)');
+
+ok('rejects a backup whose splits object is empty', () => {
+  const b = validBackup();
+  b.routine.splits = {};
+  b.routine.splitCycle = [];
+  assert.equal(isValidBackup(b), false);
+});
+
+ok('rejects a backup whose cycle references only non-existent splits', () => {
+  // Structurally valid (splits object non-empty), but the cycle points at ids
+  // with no matching split — after import getNextSplitId would return an id
+  // that getSplitPersisted cannot resolve, breaking 오늘 훈련.
+  const b = validBackup();
+  b.routine.splits = { real_split: { id: 'real_split', name: 'x', type: 'strength', exercises: [] } };
+  b.routine.splitCycle = ['gone'];
+  assert.equal(isValidBackup(b), false);
+});
+
+ok('accepts a backup whose cycle references at least one existing split', () => {
+  const b = validBackup();
+  b.routine.splits = {
+    real_split: { id: 'real_split', name: 'x', type: 'strength', exercises: [] },
+  };
+  b.routine.splitCycle = ['real_split', 'gone'];
+  assert.equal(isValidBackup(b), true);
+});
+
+ok('accepts a backup with a non-empty splits object and an empty cycle', () => {
+  // An empty cycle is tolerated (getNextSplitId → cycle[0] is undefined, but
+  // getSplitsPersisted still appends the orphan split so 오늘 훈련 renders it).
+  const b = validBackup();
+  b.routine.splits = {
+    real_split: { id: 'real_split', name: 'x', type: 'strength', exercises: [] },
+  };
+  b.routine.splitCycle = [];
+  assert.equal(isValidBackup(b), true);
+});
+
+ok('the referentially-broken example from the review is rejected', () => {
+  const broken = {
+    sessions: [],
+    routine: { splitCycle: ['gone'], splits: {} },
+    exerciseLibrary: [],
+  };
+  assert.equal(isValidBackup(broken), false);
+});
+
 console.log(`\nAll ${passed} assertions passed.`);
 process.exit(0);

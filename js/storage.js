@@ -90,17 +90,53 @@ export function ensureMigrated() {
 // }
 export function saveSession(session) {
   const blob = readBlob();
+  const entriesByExercise = session.entriesByExercise || null;
   const record = {
     id: session.id || `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     date: session.date || new Date().toISOString().slice(0, 10),
     splitId: session.splitId,
-    entriesByExercise: session.entriesByExercise || null,
+    entriesByExercise,
+    // Snapshot the exercise display names at log time so history stays readable
+    // even after the exercise is later renamed or deleted from the routine.
+    // Prefer a caller-provided map; otherwise resolve names from the live
+    // routine for the exercises this session logged.
+    exerciseNames: entriesByExercise
+      ? buildExerciseNameSnapshot(blob, entriesByExercise, session.exerciseNames)
+      : null,
     run: session.run || null,
     createdAt: session.createdAt || new Date().toISOString(),
   };
   blob.sessions.push(record);
   writeBlob(blob);
   return record;
+}
+
+// Build a { [exerciseId]: displayName } snapshot for the exercises a session
+// logged. Uses a caller-provided map first, then resolves any remaining ids
+// against the routine held by the given blob. Ids that cannot be resolved are
+// simply omitted (the fallback chain in the UI still degrades to the id).
+function buildExerciseNameSnapshot(blob, entriesByExercise, provided) {
+  const routine = blob.routine || {};
+  const splits = routine.splits || {};
+  const names = {};
+  for (const exId of Object.keys(entriesByExercise)) {
+    if (provided && typeof provided[exId] === 'string' && provided[exId]) {
+      names[exId] = provided[exId];
+      continue;
+    }
+    let resolved = null;
+    for (const splitId of Object.keys(splits)) {
+      const split = splits[splitId];
+      if (!split || !Array.isArray(split.exercises)) continue;
+      const found = split.exercises.find((ex) => ex.id === exId);
+      if (found) {
+        resolved = found.name;
+        break;
+      }
+    }
+    if (resolved) names[exId] = resolved;
+  }
+  return names;
 }
 
 // Read all sessions (chronological order as stored).
@@ -130,6 +166,13 @@ export function updateSession(sessionId, patch) {
     if (typeof patch.date === 'string' && patch.date) updated.date = patch.date;
     if (patch.entriesByExercise && typeof patch.entriesByExercise === 'object') {
       updated.entriesByExercise = patch.entriesByExercise;
+      // Refresh the name snapshot for the (possibly changed) exercise set,
+      // preserving any names already snapshotted on the existing record.
+      updated.exerciseNames = buildExerciseNameSnapshot(
+        blob,
+        patch.entriesByExercise,
+        current.exerciseNames || {}
+      );
     }
     if (patch.run && typeof patch.run === 'object') updated.run = patch.run;
   }
@@ -206,11 +249,31 @@ export function getExercisePersisted(exerciseId) {
 }
 
 // Return a persisted running definition ('easy' | 'interval').
-export function getRunPersisted(runType) {
+// When `splitId` is given, the run def is resolved from THAT split (so a
+// routine with more than one running split grades against the split actually
+// being trained). When it is omitted, or the given split has no matching run
+// def, it falls back to scanning splits for the first running split that
+// defines `runType` (preserves v1/single-running-split behavior and keeps a
+// newly-added empty running split from silently losing its target lines when a
+// usable definition exists elsewhere is NOT desired, so the scan is only a
+// fallback for the no-splitId case).
+export function getRunPersisted(runType, splitId) {
   const routine = readBlob().routine;
   const splits = routine.splits || {};
-  for (const splitId of Object.keys(splits)) {
+
+  // Preferred: resolve from the split in scope.
+  if (splitId) {
     const split = splits[splitId];
+    if (split && split.type === 'running' && split.runs && split.runs[runType]) {
+      return split.runs[runType];
+    }
+    // A running split was named but has no def for this run type → no target.
+    if (split && split.type === 'running') return null;
+  }
+
+  // Fallback (no split in scope): first running split defining runType.
+  for (const id of Object.keys(splits)) {
+    const split = splits[id];
     if (split && split.type === 'running' && split.runs && split.runs[runType]) {
       return split.runs[runType];
     }
@@ -367,8 +430,13 @@ export function deleteLibraryExercise(id) {
 // =============================================================================
 
 // Pure validation of a parsed backup object. Returns true only when the object
-// has the expected v2 backup shape: a sessions array, a routine object that
-// carries a splitCycle array and a splits object, and an exerciseLibrary array.
+// has the expected v2 backup shape AND is internally consistent enough to drive
+// the 오늘 훈련 view: a sessions array, a routine object that carries a
+// splitCycle array and a splits object, an exerciseLibrary array, and —
+// crucially — a routine whose cycle/splits resolve to at least one usable
+// split. Without the referential check a structurally-valid but self-
+// inconsistent blob (cycle ids with no matching splits, or empty splits) would
+// pass and, once imported, drive 오늘 훈련 into its error card.
 // Kept pure (no localStorage) so it can be unit-tested in node and reused by the
 // import UI to reject malformed files BEFORE overwriting existing data.
 export function isValidBackup(obj) {
@@ -381,6 +449,14 @@ export function isValidBackup(obj) {
     return false;
   }
   if (!Array.isArray(obj.exerciseLibrary)) return false;
+
+  // Referential integrity: there must be at least one real split definition,
+  // and the cycle (when non-empty) must reference at least one existing split,
+  // so getNextSplitId → getSplitPersisted resolves to a renderable split.
+  const splitIds = Object.keys(routine.splits);
+  if (splitIds.length === 0) return false;
+  const cycle = routine.splitCycle;
+  if (cycle.length > 0 && !cycle.some((id) => routine.splits[id])) return false;
   return true;
 }
 
