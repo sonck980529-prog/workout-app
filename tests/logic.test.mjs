@@ -9,6 +9,9 @@ import {
   getSplit,
   getExercise,
   getRun,
+  getDefaultRoutine,
+  getDefaultExerciseLibrary,
+  EXERCISE_LIBRARY_SEED,
 } from '../js/data.js';
 
 import {
@@ -94,6 +97,63 @@ ok('running easy + interval paces stored as seconds/km', () => {
   assert.equal(interval.repCount, 4);
 });
 
+console.log('data.js — default routine & exercise library seed (FEAT-004)');
+
+ok('getDefaultRoutine returns the default cycle + splits', () => {
+  const routine = getDefaultRoutine();
+  assert.deepEqual(routine.splitCycle, [
+    SPLIT_IDS.CHEST_BACK,
+    SPLIT_IDS.SHOULDER_LEGS_ABS,
+    SPLIT_IDS.RUNNING,
+  ]);
+  assert.equal(routine.splits[SPLIT_IDS.CHEST_BACK].exercises.length, 4);
+  assert.equal(routine.splits[SPLIT_IDS.RUNNING].runs.easy.paceMinSecPerKm, 375);
+});
+
+ok('getDefaultRoutine is a deep clone (mutating it does not change SPLITS)', () => {
+  const routine = getDefaultRoutine();
+  routine.splits[SPLIT_IDS.CHEST_BACK].exercises[0].name = 'MUTATED';
+  routine.splits[SPLIT_IDS.CHEST_BACK].exercises.push({ id: 'x', name: 'y' });
+  routine.splitCycle.push('extra');
+  // The pure helper still returns the pristine values.
+  const fresh = getSplit(SPLIT_IDS.CHEST_BACK);
+  assert.equal(fresh.exercises.length, 4);
+  assert.notEqual(fresh.exercises[0].name, 'MUTATED');
+  assert.deepEqual(getSplitCycle(), [
+    SPLIT_IDS.CHEST_BACK,
+    SPLIT_IDS.SHOULDER_LEGS_ABS,
+    SPLIT_IDS.RUNNING,
+  ]);
+});
+
+ok('seeded exercise library contains the default strength exercises', () => {
+  const lib = getDefaultExerciseLibrary();
+  const ids = new Set(lib.map((e) => e.id));
+  // Default split exercises are present.
+  assert.ok(ids.has('ohp_40kg'));
+  assert.ok(ids.has('pullup_12kg'));
+  assert.ok(ids.has('lunge_40kg'));
+  // OHP retains its user-corrected 4 sets.
+  assert.equal(lib.find((e) => e.id === 'ohp_40kg').sets, 4);
+});
+
+ok('seeded exercise library adds the common exercises', () => {
+  const lib = getDefaultExerciseLibrary();
+  const names = new Set(lib.map((e) => e.name));
+  ['벤치프레스', '데드리프트', '바벨 로우', '덤벨 컬', '플랭크'].forEach((n) => {
+    assert.ok(names.has(n), `expected library to contain ${n}`);
+  });
+  assert.equal(EXERCISE_LIBRARY_SEED.length, 5);
+});
+
+ok('getDefaultExerciseLibrary has no duplicate ids and is a deep clone', () => {
+  const lib = getDefaultExerciseLibrary();
+  const ids = lib.map((e) => e.id);
+  assert.equal(ids.length, new Set(ids).size);
+  lib.find((e) => e.id === 'ohp_40kg').sets = 99;
+  assert.equal(getExercise('ohp_40kg').sets, 4); // source unchanged
+});
+
 console.log('progression.js — rotation');
 
 ok('rotation wraps 러닝 -> 등·가슴', () => {
@@ -105,6 +165,19 @@ ok('rotation wraps 러닝 -> 등·가슴', () => {
 ok('rotation defaults to first split when no/unknown previous', () => {
   assert.equal(nextSplitId(null), SPLIT_IDS.CHEST_BACK);
   assert.equal(nextSplitId('nonsense'), SPLIT_IDS.CHEST_BACK);
+});
+
+ok('nextSplitId rotates using a custom cycle argument (FEAT-004)', () => {
+  const cycle = ['a', 'b', 'c'];
+  assert.equal(nextSplitId('a', cycle), 'b');
+  assert.equal(nextSplitId('c', cycle), 'a'); // wraps
+  assert.equal(nextSplitId('unknown', cycle), 'a'); // default to first
+  assert.equal(nextSplitId(null, cycle), 'a');
+  // A two-item edited cycle rotates within itself, not the default 3-split one.
+  assert.equal(nextSplitId(SPLIT_IDS.CHEST_BACK, [SPLIT_IDS.CHEST_BACK, SPLIT_IDS.RUNNING]), SPLIT_IDS.RUNNING);
+  assert.equal(nextSplitId(SPLIT_IDS.RUNNING, [SPLIT_IDS.CHEST_BACK, SPLIT_IDS.RUNNING]), SPLIT_IDS.CHEST_BACK);
+  // Empty/invalid cycle falls back to the default SPLIT_CYCLE.
+  assert.equal(nextSplitId(SPLIT_IDS.CHEST_BACK, []), SPLIT_IDS.SHOULDER_LEGS_ABS);
 });
 
 console.log('progression.js — upper target detection');

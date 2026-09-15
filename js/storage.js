@@ -1,25 +1,64 @@
-// storage.js — localStorage persistence layer + split-rotation helper.
-// Depends on data.js for the rotation. Uses a single versioned JSON blob.
+// storage.js — localStorage persistence layer + routine/library state.
+// Persists a single versioned JSON blob that holds logged sessions, the
+// editable routine (splits, ordered split cycle, running defs) and an
+// exercise library. Seeds the routine + library from data.js defaults on first
+// run (or migrates existing v1 data in place, preserving all sessions).
 
-import { SPLIT_CYCLE } from './data.js';
+import {
+  getDefaultRoutine,
+  getDefaultExerciseLibrary,
+} from './data.js';
 import { nextSplitId } from './progression.js';
 
 export const STORAGE_KEY = 'htracker.v1';
+export const SCHEMA_VERSION = 2;
+
+// --- ID generation (mirrors the session id pattern) -------------------------
+function genId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// --- Blob read/write with in-place migration --------------------------------
+
+// Attach a seeded routine + exercise library to a blob when absent, and set
+// schemaVersion to 2. Idempotent: an existing routine/library is left as-is and
+// the sessions array is never dropped. Mutates and returns the given blob.
+function migrateBlob(blob) {
+  if (!blob || typeof blob !== 'object') {
+    blob = { sessions: [] };
+  }
+  if (!Array.isArray(blob.sessions)) {
+    blob.sessions = [];
+  }
+  if (!blob.routine || typeof blob.routine !== 'object' || !blob.routine.splits) {
+    blob.routine = getDefaultRoutine();
+  }
+  if (!Array.isArray(blob.exerciseLibrary)) {
+    blob.exerciseLibrary = getDefaultExerciseLibrary();
+  }
+  blob.schemaVersion = SCHEMA_VERSION;
+  return blob;
+}
 
 // Internal: read the full blob, guarding against parse errors / missing storage.
+// Always returns a migrated (v2) shape so callers can rely on routine + library.
 function readBlob() {
+  let parsed;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { sessions: [] };
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.sessions)) {
-      return { sessions: [] };
+    if (!raw) {
+      parsed = { sessions: [] };
+    } else {
+      parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.sessions)) {
+        parsed = { sessions: [] };
+      }
     }
-    return parsed;
   } catch (err) {
     // Corrupt data or unavailable storage → start fresh in memory.
-    return { sessions: [] };
+    parsed = { sessions: [] };
   }
+  return migrateBlob(parsed);
 }
 
 // Internal: write the full blob.
@@ -30,6 +69,14 @@ function writeBlob(blob) {
   } catch (err) {
     return false;
   }
+}
+
+// Ensure the persisted blob has been migrated and written back at least once.
+// Safe to call on app init so v1 data is upgraded in place.
+export function ensureMigrated() {
+  const blob = readBlob();
+  writeBlob(blob);
+  return blob;
 }
 
 // Save a logged session.
@@ -101,13 +148,256 @@ export function getSessionsForExercise(exerciseId) {
     .map((s) => ({ date: s.date, entries: s.entriesByExercise[exerciseId] }));
 }
 
-// Determine the next split in the rotation based on the last logged session.
-// Defaults to the first split when there are no sessions.
+// =============================================================================
+// Routine (persisted, editable) — accessors
+// =============================================================================
+
+// Return the whole persisted routine { splitCycle, splits }.
+export function getRoutine() {
+  return readBlob().routine;
+}
+
+// Return the persisted ordered split cycle (array of split ids).
+export function getSplitCyclePersisted() {
+  const routine = readBlob().routine;
+  return Array.isArray(routine.splitCycle) ? [...routine.splitCycle] : [];
+}
+
+// Return the ordered array of persisted split definition objects, ordered by
+// the persisted split cycle. Any split ids in the cycle without a definition
+// are skipped; any splits not referenced by the cycle are appended after.
+export function getSplitsPersisted() {
+  const routine = readBlob().routine;
+  const splits = routine.splits || {};
+  const cycle = Array.isArray(routine.splitCycle) ? routine.splitCycle : [];
+  const ordered = [];
+  const used = new Set();
+  for (const id of cycle) {
+    if (splits[id]) {
+      ordered.push(splits[id]);
+      used.add(id);
+    }
+  }
+  for (const id of Object.keys(splits)) {
+    if (!used.has(id)) ordered.push(splits[id]);
+  }
+  return ordered;
+}
+
+// Look up a persisted split definition by id.
+export function getSplitPersisted(splitId) {
+  const routine = readBlob().routine;
+  return (routine.splits && routine.splits[splitId]) || null;
+}
+
+// Look up a single strength exercise by id across all persisted strength splits.
+export function getExercisePersisted(exerciseId) {
+  const routine = readBlob().routine;
+  const splits = routine.splits || {};
+  const cycle = Array.isArray(routine.splitCycle) ? routine.splitCycle : Object.keys(splits);
+  const ids = [...new Set([...cycle, ...Object.keys(splits)])];
+  for (const splitId of ids) {
+    const split = splits[splitId];
+    if (!split || !Array.isArray(split.exercises)) continue;
+    const found = split.exercises.find((ex) => ex.id === exerciseId);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Return a persisted running definition ('easy' | 'interval').
+export function getRunPersisted(runType) {
+  const routine = readBlob().routine;
+  const splits = routine.splits || {};
+  for (const splitId of Object.keys(splits)) {
+    const split = splits[splitId];
+    if (split && split.type === 'running' && split.runs && split.runs[runType]) {
+      return split.runs[runType];
+    }
+  }
+  return null;
+}
+
+// =============================================================================
+// Routine (persisted, editable) — mutations (used by FEAT-005)
+// =============================================================================
+
+// Add a new split (generates an id if absent) or replace an existing one by id.
+// Appends the id to the split cycle when it is new. Returns the saved split.
+export function saveSplit(split) {
+  const blob = readBlob();
+  const routine = blob.routine;
+  if (!routine.splits) routine.splits = {};
+  if (!Array.isArray(routine.splitCycle)) routine.splitCycle = [];
+  const id = split.id || genId('sp');
+  const saved = { ...split, id };
+  routine.splits[id] = saved;
+  if (!routine.splitCycle.includes(id)) routine.splitCycle.push(id);
+  writeBlob(blob);
+  return saved;
+}
+
+// Shallow-patch an existing split's top-level fields (e.g. name). Returns the
+// updated split or null when not found.
+export function updateSplit(splitId, patch) {
+  const blob = readBlob();
+  const routine = blob.routine;
+  const split = routine.splits && routine.splits[splitId];
+  if (!split) return null;
+  const updated = { ...split, ...(patch || {}), id: splitId };
+  routine.splits[splitId] = updated;
+  writeBlob(blob);
+  return updated;
+}
+
+// Delete a split by id and remove it from the cycle. Returns true if removed.
+export function deleteSplit(splitId) {
+  const blob = readBlob();
+  const routine = blob.routine;
+  if (!routine.splits || !routine.splits[splitId]) return false;
+  delete routine.splits[splitId];
+  if (Array.isArray(routine.splitCycle)) {
+    routine.splitCycle = routine.splitCycle.filter((id) => id !== splitId);
+  }
+  writeBlob(blob);
+  return true;
+}
+
+// Add an exercise (generates an id if absent) to a strength split.
+// Returns the added exercise or null when the split is missing.
+export function addExerciseToSplit(splitId, exercise) {
+  const blob = readBlob();
+  const routine = blob.routine;
+  const split = routine.splits && routine.splits[splitId];
+  if (!split) return null;
+  if (!Array.isArray(split.exercises)) split.exercises = [];
+  const added = { ...exercise, id: exercise.id || genId('ex') };
+  split.exercises.push(added);
+  writeBlob(blob);
+  return added;
+}
+
+// Shallow-patch an exercise within a split. Returns the updated exercise or null.
+export function updateExercise(splitId, exerciseId, patch) {
+  const blob = readBlob();
+  const routine = blob.routine;
+  const split = routine.splits && routine.splits[splitId];
+  if (!split || !Array.isArray(split.exercises)) return null;
+  const idx = split.exercises.findIndex((ex) => ex.id === exerciseId);
+  if (idx === -1) return null;
+  const updated = { ...split.exercises[idx], ...(patch || {}), id: exerciseId };
+  split.exercises[idx] = updated;
+  writeBlob(blob);
+  return updated;
+}
+
+// Delete an exercise from a split. Returns true if removed.
+export function deleteExercise(splitId, exerciseId) {
+  const blob = readBlob();
+  const routine = blob.routine;
+  const split = routine.splits && routine.splits[splitId];
+  if (!split || !Array.isArray(split.exercises)) return false;
+  const before = split.exercises.length;
+  split.exercises = split.exercises.filter((ex) => ex.id !== exerciseId);
+  if (split.exercises.length === before) return false;
+  writeBlob(blob);
+  return true;
+}
+
+// Reorder the split cycle. Keeps only ids that have a split definition; any
+// existing splits missing from the given order are appended afterwards.
+export function reorderSplitCycle(orderedIds) {
+  const blob = readBlob();
+  const routine = blob.routine;
+  const splits = routine.splits || {};
+  const valid = (Array.isArray(orderedIds) ? orderedIds : []).filter((id) => splits[id]);
+  const seen = new Set(valid);
+  for (const id of Object.keys(splits)) {
+    if (!seen.has(id)) valid.push(id);
+  }
+  routine.splitCycle = valid;
+  writeBlob(blob);
+  return [...valid];
+}
+
+// =============================================================================
+// Exercise library
+// =============================================================================
+
+// Return the persisted exercise library array.
+export function getExerciseLibrary() {
+  return readBlob().exerciseLibrary;
+}
+
+// Add a library exercise (generates an id if absent). Returns the added entry.
+export function addLibraryExercise(exercise) {
+  const blob = readBlob();
+  if (!Array.isArray(blob.exerciseLibrary)) blob.exerciseLibrary = [];
+  const added = { ...exercise, id: exercise.id || genId('lib') };
+  blob.exerciseLibrary.push(added);
+  writeBlob(blob);
+  return added;
+}
+
+// Shallow-patch a library exercise by id. Returns the updated entry or null.
+export function updateLibraryExercise(id, patch) {
+  const blob = readBlob();
+  if (!Array.isArray(blob.exerciseLibrary)) return null;
+  const idx = blob.exerciseLibrary.findIndex((ex) => ex.id === id);
+  if (idx === -1) return null;
+  const updated = { ...blob.exerciseLibrary[idx], ...(patch || {}), id };
+  blob.exerciseLibrary[idx] = updated;
+  writeBlob(blob);
+  return updated;
+}
+
+// Delete a library exercise by id. Returns true if removed.
+export function deleteLibraryExercise(id) {
+  const blob = readBlob();
+  if (!Array.isArray(blob.exerciseLibrary)) return false;
+  const before = blob.exerciseLibrary.length;
+  blob.exerciseLibrary = blob.exerciseLibrary.filter((ex) => ex.id !== id);
+  if (blob.exerciseLibrary.length === before) return false;
+  writeBlob(blob);
+  return true;
+}
+
+// =============================================================================
+// Backup / restore (used by FEAT-006)
+// =============================================================================
+
+// Export the full persisted blob as a JSON string for backup.
+export function exportData() {
+  return JSON.stringify(readBlob(), null, 2);
+}
+
+// Import a previously exported JSON string, replacing the persisted blob.
+// Returns true on success. Runs the parsed data through migration so partial
+// backups still yield a valid v2 shape.
+export function importData(json) {
+  try {
+    const parsed = typeof json === 'string' ? JSON.parse(json) : json;
+    if (!parsed || typeof parsed !== 'object') return false;
+    return writeBlob(migrateBlob(parsed));
+  } catch (err) {
+    return false;
+  }
+}
+
+// =============================================================================
+// Rotation
+// =============================================================================
+
+// Determine the next split in the rotation based on the last logged session,
+// using the PERSISTED (potentially edited) split cycle.
+// Defaults to the first split of the persisted cycle when there are no sessions.
 export function getNextSplitId() {
-  const sessions = readBlob().sessions;
-  if (sessions.length === 0) return SPLIT_CYCLE[0];
+  const blob = readBlob();
+  const cycle = Array.isArray(blob.routine.splitCycle) ? blob.routine.splitCycle : [];
+  const sessions = blob.sessions;
+  if (sessions.length === 0) return cycle[0];
   const last = sessions[sessions.length - 1];
-  return nextSplitId(last.splitId);
+  return nextSplitId(last.splitId, cycle);
 }
 
 // Clear all stored data (utility for reset).

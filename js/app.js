@@ -6,7 +6,6 @@
 // PURE logic lives in progression.js / data.js. Persistence lives in storage.js.
 // This module only does DOM wiring and formatting.
 
-import { getSplit, getSplits, getRun, getExercise, SPLIT_IDS } from './data.js';
 import {
   saveSession,
   getAllSessions,
@@ -14,6 +13,11 @@ import {
   getNextSplitId,
   deleteSession,
   updateSession,
+  ensureMigrated,
+  getSplitPersisted,
+  getSplitsPersisted,
+  getRunPersisted,
+  getExercisePersisted,
 } from './storage.js';
 import {
   goalVsActual,
@@ -61,7 +65,7 @@ function todayIso() {
 }
 
 function splitName(splitId) {
-  const split = getSplit(splitId);
+  const split = getSplitPersisted(splitId);
   return split ? split.name : '알 수 없음';
 }
 
@@ -169,8 +173,8 @@ function strengthExerciseMarkup(ex) {
 }
 
 function runningMarkup() {
-  const easy = getRun('easy');
-  const interval = getRun('interval');
+  const easy = getRunPersisted('easy');
+  const interval = getRunPersisted('interval');
   return `
     <div class="card exercise" data-run="true">
       <h3>러닝</h3>
@@ -212,7 +216,7 @@ function renderToday() {
   if (!view) return;
 
   const splitId = getNextSplitId();
-  const split = getSplit(splitId);
+  const split = getSplitPersisted(splitId);
 
   if (!split) {
     view.innerHTML = `<div class="card"><p class="status-danger">루틴 정보를 불러오지 못했습니다.</p></div>`;
@@ -298,7 +302,7 @@ function refreshRunEval(card) {
   const target = card.querySelector('.goal-actual');
   if (!target) return;
   const type = card.querySelector('.input-run-type').value;
-  const runDef = getRun(type);
+  const runDef = getRunPersisted(type);
   const wholePaceSec = parsePace(
     card.querySelector('.input-pace-min').value,
     card.querySelector('.input-pace-sec').value
@@ -465,7 +469,7 @@ function sessionSummaryMarkup(session) {
   const name = splitName(session.splitId);
   let body;
   if (session.run) {
-    const runDef = getRun(session.run.type);
+    const runDef = getRunPersisted(session.run.type);
     const isInterval = session.run.type === 'interval';
     // Grade the rep segment for interval runs; whole-run pace for easy runs.
     const gradedPace = isInterval
@@ -510,14 +514,11 @@ function sessionSummaryMarkup(session) {
 }
 
 // Look up a strength exercise display name by id (falls back to the id itself).
+// Resolves against the persisted routine so custom/edited exercises show
+// their correct names.
 function exerciseNameFallback(exId) {
-  for (const splitId of [SPLIT_IDS.CHEST_BACK, SPLIT_IDS.SHOULDER_LEGS_ABS]) {
-    const split = getSplit(splitId);
-    if (!split || !split.exercises) continue;
-    const found = split.exercises.find((e) => e.id === exId);
-    if (found) return found.name;
-  }
-  return exId;
+  const ex = getExercisePersisted(exId);
+  return ex ? ex.name : exId;
 }
 
 function renderHistory() {
@@ -791,7 +792,7 @@ const TREND_METRIC = {
 // Build the ordered list of selectable metric options across all splits.
 function trendOptions() {
   const opts = [];
-  getSplits().forEach((split) => {
+  getSplitsPersisted().forEach((split) => {
     if (split.type === 'strength') {
       split.exercises.forEach((ex) => {
         opts.push({
@@ -889,7 +890,7 @@ function renderTrendChart(container, selection) {
   const [metric, id] = String(selection || '').split(':');
 
   if (metric === TREND_METRIC.TOP_WEIGHT || metric === TREND_METRIC.VOLUME) {
-    const ex = getExercise(id);
+    const ex = getExercisePersisted(id);
     if (!ex) {
       container.innerHTML = `<p class="chart-empty muted">${esc(EMPTY_STATE_TEXT)}</p>`;
       return;
@@ -918,7 +919,7 @@ function renderTrendChart(container, selection) {
 
   if (metric === TREND_METRIC.PACE_EASY || metric === TREND_METRIC.PACE_INTERVAL) {
     const runType = metric === TREND_METRIC.PACE_EASY ? 'easy' : 'interval';
-    const runDef = getRun(runType);
+    const runDef = getRunPersisted(runType);
     const points = pacePoints(runType);
     const fmt = (v) => `${formatPace(v)}/km`;
     const band = runDef
@@ -978,6 +979,13 @@ function renderTrends() {
 
 function init() {
   initNav();
+  try {
+    // Seed the default routine + exercise library on first run, or migrate any
+    // existing v1 data in place (sessions preserved) before rendering.
+    ensureMigrated();
+  } catch (err) {
+    console.error('마이그레이션 오류:', err);
+  }
   try {
     renderToday();
     renderHistory();

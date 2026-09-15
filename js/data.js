@@ -83,6 +83,59 @@ export const SPLITS = {
   },
 };
 
+// --- Exercise library seed ---------------------------------------------------
+// Default library entries. Includes the default splits' strength exercises plus
+// a handful of sensible common ones. Each entry mirrors the split-exercise shape
+// (name, defaultWeightKg, repMin, repMax, sets, perLeg) plus an id.
+export const EXERCISE_LIBRARY_SEED = [
+  // --- Common additions ---
+  { id: 'lib_bench_press', name: '벤치프레스', defaultWeightKg: 40, repMin: 6, repMax: 10, sets: 4, perLeg: false },
+  { id: 'lib_deadlift', name: '데드리프트', defaultWeightKg: 60, repMin: 5, repMax: 8, sets: 3, perLeg: false },
+  { id: 'lib_barbell_row', name: '바벨 로우', defaultWeightKg: 40, repMin: 8, repMax: 12, sets: 4, perLeg: false },
+  { id: 'lib_dumbbell_curl', name: '덤벨 컬', defaultWeightKg: 10, repMin: 10, repMax: 15, sets: 3, perLeg: false },
+  { id: 'lib_plank', name: '플랭크', defaultWeightKg: 0, repMin: 30, repMax: 60, sets: 3, perLeg: false },
+];
+
+// --- Deep clone helper (structuredClone with a JSON fallback) ----------------
+function deepClone(value) {
+  if (typeof structuredClone === 'function') return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
+}
+
+// Return a FRESH deep-cloned default routine object suitable for seeding
+// persisted state. Mutating the returned object never touches the module-level
+// SPLIT_CYCLE / SPLITS constants.
+export function getDefaultRoutine() {
+  return {
+    splitCycle: deepClone(SPLIT_CYCLE),
+    splits: deepClone(SPLITS),
+  };
+}
+
+// Return a FRESH deep-cloned default exercise library array for seeding.
+// Includes the default splits' strength exercises plus the common additions.
+export function getDefaultExerciseLibrary() {
+  const seen = new Set();
+  const library = [];
+  // Strength exercises from the default splits first (preserve their ids).
+  for (const splitId of SPLIT_CYCLE) {
+    const split = SPLITS[splitId];
+    if (!split || !split.exercises) continue;
+    for (const ex of split.exercises) {
+      if (seen.has(ex.id)) continue;
+      seen.add(ex.id);
+      library.push(deepClone(ex));
+    }
+  }
+  // Then the common additions.
+  for (const ex of EXERCISE_LIBRARY_SEED) {
+    if (seen.has(ex.id)) continue;
+    seen.add(ex.id);
+    library.push(deepClone(ex));
+  }
+  return library;
+}
+
 // --- Helpers -----------------------------------------------------------------
 
 // Return the ordered split cycle (array of split ids).
