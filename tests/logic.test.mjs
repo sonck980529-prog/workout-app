@@ -39,7 +39,7 @@ import {
 
 import { validateExerciseInput } from '../js/app.js';
 
-import { isValidBackup } from '../js/storage.js';
+import { isValidBackup, migrateBlob, SCHEMA_VERSION } from '../js/storage.js';
 
 import {
   QUALIFYING_WINDOW,
@@ -110,6 +110,80 @@ ok('running easy + interval paces stored as seconds/km', () => {
   assert.equal(interval.distanceMaxKm, 8);
   assert.equal(interval.warmupKm, 1.5);
   assert.equal(interval.repCount, 4);
+});
+
+console.log('data.js — renamed strength exercises (FEAT-002)');
+
+ok('the 5 weighted exercises are renamed by id (weight/reps/sets unchanged)', () => {
+  const pullup = getExercise('pullup_12kg');
+  assert.equal(pullup.name, '중량 풀업');
+  assert.equal(pullup.defaultWeightKg, 12);
+  assert.equal(pullup.repMin, 6);
+  assert.equal(pullup.repMax, 10);
+  assert.equal(pullup.sets, 4);
+
+  const ringdips = getExercise('ringdips_12kg');
+  assert.equal(ringdips.name, '중량 링딥스');
+  assert.equal(ringdips.defaultWeightKg, 12);
+
+  const squat = getExercise('backsquat_40kg');
+  assert.equal(squat.name, '백스쿼트');
+  assert.equal(squat.defaultWeightKg, 40);
+
+  const ohpEx = getExercise('ohp_40kg');
+  assert.equal(ohpEx.name, 'OHP');
+  assert.equal(ohpEx.defaultWeightKg, 40);
+  assert.equal(ohpEx.sets, 4);
+
+  const lunge = getExercise('lunge_40kg');
+  assert.equal(lunge.name, '런지');
+  assert.equal(lunge.defaultWeightKg, 40);
+  assert.equal(lunge.perLeg, true);
+});
+
+ok('the non-renamed exercises keep their names', () => {
+  assert.equal(getExercise('pullup_bw').name, '맨몸 풀업');
+  assert.equal(getExercise('ringdips_bw').name, '맨몸 링딥스');
+  assert.equal(getExercise('lateral_raise').name, '사이드 레터럴 레이즈');
+  assert.equal(getExercise('hanging_leg_raise').name, '행잉 레그레이즈');
+});
+
+ok('the renamed names propagate to the seeded exercise library', () => {
+  const lib = getDefaultExerciseLibrary();
+  const byId = Object.fromEntries(lib.map((e) => [e.id, e]));
+  assert.equal(byId.pullup_12kg.name, '중량 풀업');
+  assert.equal(byId.ohp_40kg.name, 'OHP');
+  assert.equal(byId.lunge_40kg.name, '런지');
+});
+
+console.log('data.js — 4 running variants (FEAT-002)');
+
+ok('getRun resolves all four run types with the correct bands', () => {
+  const easy = getRun('easy');
+  assert.equal(easy.paceMinSecPerKm, 375);
+  assert.equal(easy.paceMaxSecPerKm, 400);
+
+  const interval = getRun('interval');
+  assert.equal(interval.paceMinSecPerKm, 310);
+  assert.equal(interval.paceMaxSecPerKm, 320);
+
+  const lsd = getRun('lsd');
+  assert.equal(lsd.type, 'lsd');
+  assert.equal(lsd.name, 'LSD');
+  assert.equal(lsd.distanceMinKm, 10);
+  assert.equal(lsd.distanceMaxKm, 15);
+  assert.equal(lsd.paceMinSecPerKm, 400);
+  assert.equal(lsd.paceMaxSecPerKm, 440);
+  assert.equal(lsd.paceAppliesTo, undefined);
+
+  const tempo = getRun('tempo');
+  assert.equal(tempo.type, 'tempo');
+  assert.equal(tempo.name, '템포런');
+  assert.equal(tempo.distanceMinKm, 6);
+  assert.equal(tempo.distanceMaxKm, 10);
+  assert.equal(tempo.paceMinSecPerKm, 330);
+  assert.equal(tempo.paceMaxSecPerKm, 350);
+  assert.equal(tempo.paceAppliesTo, undefined);
 });
 
 console.log('data.js — default routine & exercise library seed (FEAT-004)');
@@ -314,6 +388,59 @@ ok('pace faster than band classified as too_fast', () => {
 ok('pace slower than band classified as too_slow', () => {
   const res = evaluatePace(420, easyRun);
   assert.equal(res.result, PACE_RESULT.TOO_SLOW);
+});
+
+console.log('progression.js — evaluatePace whole-run grading for lsd/tempo (FEAT-002)');
+
+ok('lsd grades the whole run and never emits 반복 구간 wording', () => {
+  const lsd = getRun('lsd'); // 400..440 sec/km
+  const within = evaluatePace(420, lsd);
+  assert.equal(within.result, PACE_RESULT.WITHIN);
+  assert.ok(!within.message.includes('반복 구간'));
+  assert.equal(within.isEasy, false);
+  assert.ok(!within.message.includes('이지런')); // easy suffix not applied
+
+  const fast = evaluatePace(380, lsd);
+  assert.equal(fast.result, PACE_RESULT.TOO_FAST);
+  assert.ok(!fast.message.includes('반복 구간'));
+
+  const slow = evaluatePace(460, lsd);
+  assert.equal(slow.result, PACE_RESULT.TOO_SLOW);
+  assert.ok(!slow.message.includes('반복 구간'));
+});
+
+ok('tempo grades the whole run and never emits 반복 구간 wording', () => {
+  const tempo = getRun('tempo'); // 330..350 sec/km
+  const within = evaluatePace(340, tempo);
+  assert.equal(within.result, PACE_RESULT.WITHIN);
+  assert.ok(!within.message.includes('반복 구간'));
+
+  const fast = evaluatePace(320, tempo);
+  assert.equal(fast.result, PACE_RESULT.TOO_FAST);
+  assert.ok(!fast.message.includes('반복 구간'));
+
+  const slow = evaluatePace(360, tempo);
+  assert.equal(slow.result, PACE_RESULT.TOO_SLOW);
+  assert.ok(!slow.message.includes('반복 구간'));
+});
+
+ok('interval still grades the rep segment with 반복 구간 wording', () => {
+  const interval = getRun('interval'); // 310..320 sec/km, paceAppliesTo rep_segment
+  const within = evaluatePace(315, interval);
+  assert.equal(within.result, PACE_RESULT.WITHIN);
+  assert.ok(within.message.includes('반복 구간'));
+
+  const fast = evaluatePace(300, interval);
+  assert.equal(fast.result, PACE_RESULT.TOO_FAST);
+  assert.ok(fast.message.includes('반복 구간'));
+});
+
+ok('easy run keeps its recovery-first reminder', () => {
+  const res = evaluatePace(390, getRun('easy'));
+  assert.equal(res.result, PACE_RESULT.WITHIN);
+  assert.equal(res.isEasy, true);
+  assert.ok(res.message.includes('이지런'));
+  assert.ok(!res.message.includes('반복 구간'));
 });
 
 console.log('progression.js — goalVsActual & rirGuidance');
@@ -563,6 +690,135 @@ ok('the referentially-broken example from the review is rejected', () => {
     exerciseLibrary: [],
   };
   assert.equal(isValidBackup(broken), false);
+});
+
+console.log('storage.js — migrateBlob v2 -> v3 upgrade (FEAT-002)');
+
+// Build a v2-shaped persisted blob with the OLD names and only easy+interval runs.
+function v2Blob() {
+  return {
+    schemaVersion: 2,
+    sessions: [
+      { id: 's1', date: '2024-01-01', splitId: 'chest_back', entriesByExercise: { pullup_12kg: [{ weightKg: 12, reps: 8 }] } },
+      { id: 's2', date: '2024-01-03', splitId: 'running', entriesByExercise: null, run: { type: 'easy', distanceKm: 5, paceSecPerKm: 390 } },
+    ],
+    routine: {
+      splitCycle: ['chest_back', 'shoulder_legs_abs', 'running'],
+      splits: {
+        chest_back: {
+          id: 'chest_back',
+          name: '등·가슴',
+          type: 'strength',
+          exercises: [
+            { id: 'pullup_12kg', name: '12kg 풀업', defaultWeightKg: 12, repMin: 6, repMax: 10, sets: 4, perLeg: false },
+            { id: 'ringdips_12kg', name: '12kg 링딥스', defaultWeightKg: 12, repMin: 6, repMax: 10, sets: 4, perLeg: false },
+            { id: 'pullup_bw', name: '맨몸 풀업', defaultWeightKg: 0, repMin: 8, repMax: 12, sets: 3, perLeg: false },
+          ],
+        },
+        shoulder_legs_abs: {
+          id: 'shoulder_legs_abs',
+          name: '어깨·하체·복근',
+          type: 'strength',
+          exercises: [
+            { id: 'backsquat_40kg', name: '40kg 백스쿼트', defaultWeightKg: 40, repMin: 10, repMax: 15, sets: 4, perLeg: false },
+            { id: 'ohp_40kg', name: '40kg OHP', defaultWeightKg: 40, repMin: 8, repMax: 12, sets: 4, perLeg: false },
+            { id: 'lunge_40kg', name: '40kg 런지', defaultWeightKg: 40, repMin: 8, repMax: 12, sets: 3, perLeg: true },
+          ],
+        },
+        running: {
+          id: 'running',
+          name: '러닝',
+          type: 'running',
+          runs: {
+            easy: { id: 'run_easy', name: '이지런 (조깅)', type: 'easy', distanceMinKm: 5, distanceMaxKm: 7, paceMinSecPerKm: 375, paceMaxSecPerKm: 400, note: '대화 가능한 호흡' },
+            interval: { id: 'run_interval', name: '인터벌', type: 'interval', distanceMinKm: 7, distanceMaxKm: 8, paceMinSecPerKm: 310, paceMaxSecPerKm: 320, paceAppliesTo: 'rep_segment', note: '반복 구간 페이스' },
+          },
+        },
+      },
+    },
+    exerciseLibrary: [
+      { id: 'pullup_12kg', name: '12kg 풀업', defaultWeightKg: 12, repMin: 6, repMax: 10, sets: 4, perLeg: false },
+      { id: 'ohp_40kg', name: '40kg OHP', defaultWeightKg: 40, repMin: 8, repMax: 12, sets: 4, perLeg: false },
+      { id: 'lunge_40kg', name: '40kg 런지', defaultWeightKg: 40, repMin: 8, repMax: 12, sets: 3, perLeg: true },
+    ],
+  };
+}
+
+function findEx(blob, splitId, exId) {
+  return blob.routine.splits[splitId].exercises.find((e) => e.id === exId);
+}
+function libEx(blob, exId) {
+  return blob.exerciseLibrary.find((e) => e.id === exId);
+}
+
+ok('migrateBlob renames the 5 exercises by id, adds lsd/tempo, preserves sessions', () => {
+  const blob = migrateBlob(v2Blob());
+  assert.equal(blob.schemaVersion, SCHEMA_VERSION);
+  assert.equal(SCHEMA_VERSION, 3);
+
+  // Renames by id in the routine.
+  assert.equal(findEx(blob, 'chest_back', 'pullup_12kg').name, '중량 풀업');
+  assert.equal(findEx(blob, 'chest_back', 'ringdips_12kg').name, '중량 링딥스');
+  assert.equal(findEx(blob, 'shoulder_legs_abs', 'backsquat_40kg').name, '백스쿼트');
+  assert.equal(findEx(blob, 'shoulder_legs_abs', 'ohp_40kg').name, 'OHP');
+  assert.equal(findEx(blob, 'shoulder_legs_abs', 'lunge_40kg').name, '런지');
+  // Non-renamed exercise untouched.
+  assert.equal(findEx(blob, 'chest_back', 'pullup_bw').name, '맨몸 풀업');
+  // Weights preserved.
+  assert.equal(findEx(blob, 'chest_back', 'pullup_12kg').defaultWeightKg, 12);
+  assert.equal(findEx(blob, 'shoulder_legs_abs', 'ohp_40kg').defaultWeightKg, 40);
+
+  // Renames by id in the exercise library.
+  assert.equal(libEx(blob, 'pullup_12kg').name, '중량 풀업');
+  assert.equal(libEx(blob, 'ohp_40kg').name, 'OHP');
+  assert.equal(libEx(blob, 'lunge_40kg').name, '런지');
+
+  // Runs: easy/interval preserved, lsd/tempo added.
+  const runs = blob.routine.splits.running.runs;
+  assert.equal(runs.easy.paceMinSecPerKm, 375);
+  assert.equal(runs.interval.paceAppliesTo, 'rep_segment');
+  assert.ok(runs.lsd);
+  assert.equal(runs.lsd.type, 'lsd');
+  assert.equal(runs.lsd.distanceMinKm, 10);
+  assert.equal(runs.lsd.paceMaxSecPerKm, 440);
+  assert.ok(runs.tempo);
+  assert.equal(runs.tempo.type, 'tempo');
+  assert.equal(runs.tempo.paceMinSecPerKm, 330);
+
+  // Sessions preserved untouched.
+  assert.equal(blob.sessions.length, 2);
+  assert.equal(blob.sessions[0].id, 's1');
+  assert.equal(blob.sessions[1].run.paceSecPerKm, 390);
+});
+
+ok('migrateBlob is idempotent: re-running does not double-apply', () => {
+  const once = migrateBlob(v2Blob());
+  const twice = migrateBlob(once);
+  // Names stay put (no re-rename), single lsd/tempo, sessions intact.
+  assert.equal(findEx(twice, 'chest_back', 'pullup_12kg').name, '중량 풀업');
+  assert.equal(findEx(twice, 'shoulder_legs_abs', 'ohp_40kg').name, 'OHP');
+  const runKeys = Object.keys(twice.routine.splits.running.runs).sort();
+  assert.deepEqual(runKeys, ['easy', 'interval', 'lsd', 'tempo']);
+  assert.equal(twice.sessions.length, 2);
+});
+
+ok('migrateBlob skips a rename when the persisted name was user-customized', () => {
+  const blob = v2Blob();
+  blob.routine.splits.chest_back.exercises[0].name = 'my pullup'; // customized pullup_12kg
+  const migrated = migrateBlob(blob);
+  assert.equal(findEx(migrated, 'chest_back', 'pullup_12kg').name, 'my pullup');
+  // Other renames still applied.
+  assert.equal(findEx(migrated, 'shoulder_legs_abs', 'ohp_40kg').name, 'OHP');
+});
+
+ok('migrateBlob does not overwrite existing lsd/tempo defs', () => {
+  const blob = v2Blob();
+  blob.routine.splits.running.runs.lsd = { id: 'run_lsd', name: '내 LSD', type: 'lsd', distanceMinKm: 12, distanceMaxKm: 18, paceMinSecPerKm: 410, paceMaxSecPerKm: 450 };
+  const migrated = migrateBlob(blob);
+  assert.equal(migrated.routine.splits.running.runs.lsd.name, '내 LSD');
+  assert.equal(migrated.routine.splits.running.runs.lsd.distanceMaxKm, 18);
+  // tempo (absent) still added.
+  assert.ok(migrated.routine.splits.running.runs.tempo);
 });
 
 console.log('coaching.js — constants');

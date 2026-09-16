@@ -155,25 +155,31 @@ export function evaluatePace(actualSecPerKm, runDef) {
   const fastest = runDef.paceMinSecPerKm; // smaller sec/km = faster
   const slowest = runDef.paceMaxSecPerKm; // larger sec/km = slower
   const isEasy = runDef.type === 'easy';
+  // Whole-run types (easy, lsd, tempo, …) grade the whole-run pace and use
+  // whole-run phrasing. Only rep-segment types (interval) grade the rep segment
+  // and emit '반복 구간' wording.
+  const isRepSegment = runDef.paceAppliesTo === 'rep_segment';
+  // Only the easy run appends the recovery-first reminder (per existing behavior).
+  const easySuffix = isEasy ? ` ${EASY_RUN_FIRST_TEXT}` : '';
 
   let result;
   let message;
 
   if (actualSecPerKm < fastest) {
     result = PACE_RESULT.TOO_FAST;
-    message = isEasy
-      ? `목표보다 빠릅니다. ${EASY_RUN_FIRST_TEXT}`
-      : '반복 구간 목표보다 빠릅니다.';
+    message = isRepSegment
+      ? '반복 구간 목표보다 빠릅니다.'
+      : `목표보다 빠릅니다.${easySuffix}`;
   } else if (actualSecPerKm > slowest) {
     result = PACE_RESULT.TOO_SLOW;
-    message = isEasy
-      ? `목표보다 느립니다. ${EASY_RUN_FIRST_TEXT}`
-      : '반복 구간 목표보다 느립니다.';
+    message = isRepSegment
+      ? '반복 구간 목표보다 느립니다.'
+      : `목표보다 느립니다.${easySuffix}`;
   } else {
     result = PACE_RESULT.WITHIN;
-    message = isEasy
-      ? `목표 범위 안입니다. ${EASY_RUN_FIRST_TEXT}`
-      : '반복 구간 목표 범위 안입니다.';
+    message = isRepSegment
+      ? '반복 구간 목표 범위 안입니다.'
+      : `목표 범위 안입니다.${easySuffix}`;
   }
 
   return { result, message, isEasy };

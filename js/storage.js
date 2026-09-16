@@ -11,7 +11,84 @@ import {
 import { nextSplitId } from './progression.js';
 
 export const STORAGE_KEY = 'htracker.v1';
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
+
+// --- v3 rename/run-variant migration data ------------------------------------
+// Rename-by-id table: only applied when the persisted `name` still equals the
+// OLD value, so user-customized names are preserved and re-running is a no-op.
+const V3_RENAMES = {
+  pullup_12kg: { from: '12kg 풀업', to: '중량 풀업' },
+  ringdips_12kg: { from: '12kg 링딥스', to: '중량 링딥스' },
+  backsquat_40kg: { from: '40kg 백스쿼트', to: '백스쿼트' },
+  ohp_40kg: { from: '40kg OHP', to: 'OHP' },
+  lunge_40kg: { from: '40kg 런지', to: '런지' },
+};
+
+// The two running variants added in v3 (must mirror the data.js seed exactly).
+const V3_ADDED_RUNS = {
+  lsd: {
+    id: 'run_lsd',
+    name: 'LSD',
+    type: 'lsd',
+    distanceMinKm: 10,
+    distanceMaxKm: 15,
+    paceMinSecPerKm: 400,
+    paceMaxSecPerKm: 440,
+    note: '천천히 오래 (LSD)',
+  },
+  tempo: {
+    id: 'run_tempo',
+    name: '템포런',
+    type: 'tempo',
+    distanceMinKm: 6,
+    distanceMaxKm: 10,
+    paceMinSecPerKm: 330,
+    paceMaxSecPerKm: 350,
+    note: '지속주 (템포)',
+  },
+};
+
+// Idempotent v3 upgrade of the PERSISTED routine + exercise library.
+// (a) Rename-by-id: only when the persisted name still matches the OLD value.
+// (b) Add lsd/tempo run variants to the persisted running split when absent.
+// Never touches blob.sessions or existing easy/interval runs.
+function applyV3Upgrade(blob) {
+  // (a) Rename-by-id across routine splits and the exercise library.
+  const renameEntry = (entry) => {
+    if (!entry || typeof entry.id !== 'string') return;
+    const rename = V3_RENAMES[entry.id];
+    if (rename && entry.name === rename.from) {
+      entry.name = rename.to;
+    }
+  };
+  const routine = blob.routine;
+  if (routine && routine.splits && typeof routine.splits === 'object') {
+    for (const splitId of Object.keys(routine.splits)) {
+      const split = routine.splits[splitId];
+      if (split && Array.isArray(split.exercises)) {
+        split.exercises.forEach(renameEntry);
+      }
+    }
+  }
+  if (Array.isArray(blob.exerciseLibrary)) {
+    blob.exerciseLibrary.forEach(renameEntry);
+  }
+
+  // (b) Add lsd/tempo to the persisted running split(s) when absent.
+  if (routine && routine.splits && typeof routine.splits === 'object') {
+    for (const splitId of Object.keys(routine.splits)) {
+      const split = routine.splits[splitId];
+      if (!split || split.type !== 'running' || !split.runs || typeof split.runs !== 'object') {
+        continue;
+      }
+      for (const runKey of Object.keys(V3_ADDED_RUNS)) {
+        if (!split.runs[runKey]) {
+          split.runs[runKey] = { ...V3_ADDED_RUNS[runKey] };
+        }
+      }
+    }
+  }
+}
 
 // --- ID generation (mirrors the session id pattern) -------------------------
 function genId(prefix) {
@@ -23,7 +100,7 @@ function genId(prefix) {
 // Attach a seeded routine + exercise library to a blob when absent, and set
 // schemaVersion to 2. Idempotent: an existing routine/library is left as-is and
 // the sessions array is never dropped. Mutates and returns the given blob.
-function migrateBlob(blob) {
+export function migrateBlob(blob) {
   if (!blob || typeof blob !== 'object') {
     blob = { sessions: [] };
   }
@@ -36,6 +113,8 @@ function migrateBlob(blob) {
   if (!Array.isArray(blob.exerciseLibrary)) {
     blob.exerciseLibrary = getDefaultExerciseLibrary();
   }
+  // v3 in-place upgrade of the persisted routine + library (idempotent).
+  applyV3Upgrade(blob);
   blob.schemaVersion = SCHEMA_VERSION;
   return blob;
 }
