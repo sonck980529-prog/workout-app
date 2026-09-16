@@ -651,7 +651,44 @@ ok('detectPlateau suggests a weight deload at/above the window (weighted)', () =
   assert.equal(res.plateaued, true);
   assert.equal(res.streak, 3);
   assert.equal(res.suggestion.kind, 'deload_weight');
-  // 40 * 0.9 = 36, rounded to 0.5kg step = 36.
+  // notUpperSets is logged at W (40) == ohp.defaultWeightKg, so the observed
+  // plateau load and the routine default coincide: 40 * 0.9 = 36 (0.5kg step).
+  assert.equal(res.suggestion.patch.defaultWeightKg, 36);
+  assert.equal(res.basisWeightKg, 40);
+});
+
+ok('detectPlateau deload is based on the OBSERVED plateau load, not defaultWeightKg', () => {
+  // User plateaued grinding at 50kg even though the routine default is 40kg.
+  const heavyNotUpper = [
+    { weightKg: 50, reps: 12 },
+    { weightKg: 50, reps: 11 },
+    { weightKg: 50, reps: 12 },
+    { weightKg: 50, reps: 12 },
+  ];
+  const res = detectPlateau(ohp, [heavyNotUpper, heavyNotUpper, heavyNotUpper]);
+  assert.equal(res.plateaued, true);
+  assert.equal(res.basisWeightKg, 50); // observed, not the 40kg default
+  // 50 * 0.9 = 45 (0.5kg step) — anchored to what was actually lifted.
+  assert.equal(res.suggestion.patch.defaultWeightKg, 45);
+});
+
+ok('detectPlateau falls back to defaultWeightKg when the plateau load drifts', () => {
+  // Inconsistent loads across the stagnant sessions -> no single observed load.
+  const s1 = [
+    { weightKg: 47.5, reps: 12 },
+    { weightKg: 47.5, reps: 11 },
+    { weightKg: 47.5, reps: 12 },
+    { weightKg: 47.5, reps: 12 },
+  ];
+  const s2 = [
+    { weightKg: 50, reps: 12 },
+    { weightKg: 50, reps: 11 },
+    { weightKg: 50, reps: 12 },
+    { weightKg: 50, reps: 12 },
+  ];
+  const res = detectPlateau(ohp, [s1, s2, s1]);
+  assert.equal(res.plateaued, true);
+  assert.equal(res.basisWeightKg, 40); // fell back to defaultWeightKg
   assert.equal(res.suggestion.patch.defaultWeightKg, 36);
 });
 

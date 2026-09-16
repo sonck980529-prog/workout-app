@@ -246,7 +246,11 @@ function coachingCardsMarkup(ex) {
         </div>
       </div>`;
   } else if (!proposal.qualified && proposal.streak > 0) {
-    // Partial progress hint like "증량 제안까지 2/3".
+    // Partial progress hint like "증량 제안까지 2/3". The denominator is
+    // QUALIFYING_WINDOW (3 sessions ≈ 3 weeks), the agreed multi-session window.
+    // The chat mock-up showed "1/2", but that predates the confirmed 3-session
+    // window; "N/3" is intentional and matches the product decision (review
+    // issue #4), so the copy is left as-is.
     html += `
       <p class="coaching-progress muted">증량 제안까지 ${esc(proposal.streak)}/${esc(proposal.required || QUALIFYING_WINDOW)} · 다음 달성 시 상향 제안</p>`;
   }
@@ -257,7 +261,11 @@ function coachingCardsMarkup(ex) {
     const s = plateau.suggestion;
     let changeText;
     if (s.kind === 'deload_weight') {
-      changeText = `무게 ${ex.defaultWeightKg}kg → ${s.patch.defaultWeightKg}kg`;
+      // Show the deload FROM the observed plateau load (basisWeightKg) so the
+      // arrow stays coherent with the ~10% cut, which is now anchored on the
+      // load the user actually plateaued at (falls back to defaultWeightKg).
+      const fromKg = plateau.basisWeightKg != null ? plateau.basisWeightKg : ex.defaultWeightKg;
+      changeText = `무게 ${fromKg}kg → ${s.patch.defaultWeightKg}kg`;
     } else {
       changeText = `세트 ${ex.sets} → ${s.patch.sets}`;
     }
@@ -1232,9 +1240,11 @@ function paceDeltaText(deltaSec) {
   return deltaSec < 0 ? `${abs}초 빨라짐` : `${abs}초 느려짐`;
 }
 
-// Build a '다음 주 추천' hint that also folds in pending goal-up progress across
-// strength exercises (e.g. '풀업 증량 대기 2/3'). Falls back to the review's own
-// nextWeekHint when no proposal is mid-progress.
+// Collect pending goal-up progress across strength exercises (e.g.
+// '풀업 증량 대기 2/3') for the weekly-review card's "진행 중 제안" row. Returns an
+// array of phrases (empty when nothing is mid-progress). This AUGMENTS the
+// review's own nextWeekHint on a separate row rather than replacing it, so the
+// PR/volume/pace conclusion always stays visible (review issue #2).
 function pendingProposalHint() {
   const parts = [];
   getSplitsPersisted().forEach((split) => {
@@ -1304,9 +1314,16 @@ function weeklyReviewMarkup() {
   }
   const paceLine = paceParts.length ? paceParts.join(' · ') : '<span class="muted">비교할 러닝 데이터가 없습니다</span>';
 
-  // 다음 주 추천: prefer pending proposal progress, else the review hint.
+  // 다음 주 추천: ALWAYS show the review's own signal-aware hint (PR / volume /
+  // pace). Pending goal-up progress is shown on its OWN row so it augments,
+  // rather than shadows, review.nextWeekHint (previously the pending progress
+  // replaced the hint whenever any exercise had streak>0, so the PR/volume/pace
+  // conclusion rarely surfaced — see review issue #2).
   const pending = pendingProposalHint();
-  const nextHint = pending.length ? pending.join(' · ') : review.nextWeekHint;
+  const pendingRow = pending.length
+    ? `
+      <div class="review-row review-hint"><span class="review-label muted">진행 중 제안</span><span class="review-value">${esc(pending.join(' · '))}</span></div>`
+    : '';
 
   return `
     <div class="card weekly-review">
@@ -1315,7 +1332,7 @@ function weeklyReviewMarkup() {
       <div class="review-row"><span class="review-label muted">PR 갱신</span><span class="review-value">${prLine}</span></div>
       <div class="review-row"><span class="review-label muted">지난주 대비 총 볼륨</span><span class="review-value">${volumeLine}</span></div>
       <div class="review-row"><span class="review-label muted">러닝 페이스 변화</span><span class="review-value">${paceLine}</span></div>
-      <div class="review-row review-hint"><span class="review-label muted">다음 주 추천</span><span class="review-value">${esc(nextHint)}</span></div>
+      <div class="review-row review-hint"><span class="review-label muted">다음 주 추천</span><span class="review-value">${esc(review.nextWeekHint)}</span></div>${pendingRow}
     </div>`;
 }
 

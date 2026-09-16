@@ -43,6 +43,21 @@ function roundToHalfKg(kg) {
   return Math.round(kg * 2) / 2;
 }
 
+// Derive the load the user actually plateaued at, given the trailing stagnant
+// sessions (each an array of {weightKg, reps} set entries, oldest->newest).
+// Uses the most-recent session's per-session load (sessionLoadKg = MIN weight
+// of that session) so the deload anchors on what was most recently lifted, and
+// only when that load is consistent across the whole plateau slice — otherwise
+// the load is drifting and there is no single "current weight" to cut from, so
+// we return null and let the caller fall back to the routine default.
+function observedPlateauLoad(plateauSlice) {
+  if (!Array.isArray(plateauSlice) || plateauSlice.length === 0) return null;
+  const latest = sessionLoadKg(plateauSlice[plateauSlice.length - 1]);
+  if (latest === null) return null;
+  if (!loadIsConsistent(plateauSlice)) return null;
+  return latest;
+}
+
 // (1) qualifyingStreak(exercise, sessionEntriesList)
 // sessionEntriesList: array of per-session setEntries arrays oldest->newest,
 // each element being [{weightKg, reps}, ...] (the shape suggestProgression uses).
@@ -152,6 +167,13 @@ export function proposeTargetChange(exercise, sessionEntriesList, options = {}) 
 // target. At/above the window, returns a deload suggestion. Weighted (>0kg) ->
 // deload_weight (load * DELOAD_WEIGHT_FACTOR rounded to 0.5kg, never below 0).
 // Bodyweight, or when sets>1, -> deload_sets (sets-1, min 1). Guards short input.
+//
+// The deload cut is based on the OBSERVED plateau load (the load the user
+// actually ground the last consistent sessions at), mirroring the goal-up path
+// which reasons about the observed session load — so the two paths agree on
+// what "current weight" means. We fall back to exercise.defaultWeightKg only
+// when the observed load can't be determined (no numeric weights logged, or the
+// plateau sessions drift across loads). See `observedPlateauLoad` below.
 export function detectPlateau(exercise, sessionEntriesList, options = {}) {
   const window = options.window || PLATEAU_WINDOW;
   if (!exercise || !Array.isArray(sessionEntriesList) || sessionEntriesList.length === 0) {
@@ -174,11 +196,17 @@ export function detectPlateau(exercise, sessionEntriesList, options = {}) {
   const isWeighted = (exercise.defaultWeightKg || 0) > 0;
 
   if (isWeighted) {
+    // Prefer the observed plateau load; fall back to the routine default when
+    // it can't be derived. Keeps the goal-up and deload paths symmetric.
+    const plateauSlice = sessionEntriesList.slice(sessionEntriesList.length - streak);
+    const observed = observedPlateauLoad(plateauSlice);
+    const basis = observed !== null ? observed : exercise.defaultWeightKg;
     // ~10% reduction rounded to a 0.5kg step; never below 0.
-    const reduced = Math.max(0, roundToHalfKg(exercise.defaultWeightKg * DELOAD_WEIGHT_FACTOR));
+    const reduced = Math.max(0, roundToHalfKg(basis * DELOAD_WEIGHT_FACTOR));
     return {
       plateaued: true,
       streak,
+      basisWeightKg: basis,
       suggestion: {
         kind: 'deload_weight',
         patch: { defaultWeightKg: reduced },
@@ -355,8 +383,15 @@ export function computeWeeklyReview(sessions, options = {}) {
   }
   for (const exId of Object.keys(thisMaxReps)) {
     const name = nameById[exId] || exId;
-    // Only surface a rep PR when there is no weight PR already for this exId and
-    // there is a prior baseline to beat.
+    // Rep PRs are intentionally WEIGHT-AGNOSTIC: `thisMaxReps`/`priorMaxReps`
+    // are the max reps across all sets at ANY load, so a "new max reps" PR can
+    // come from a lighter, higher-rep set. This matches the product's simple
+    // "개인 최고 반복" definition (a rep count the user has never hit before is
+    // still worth celebrating in the weekly review) and keeps sparse-data
+    // handling trivial. We deliberately do NOT gate rep PRs to the working
+    // load: rep and weight PRs are separate celebrations, and a rep PR is
+    // suppressed anyway whenever a weight PR already fired for the same
+    // exercise (see hasWeightPr) so the "heavier" signal wins when both occur.
     const hasWeightPr = prs.some((p) => p.exId === exId);
     if (
       !hasWeightPr &&
