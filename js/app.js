@@ -99,6 +99,15 @@ function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Map a run type to its Korean display name. Falls back to the run def name (or
+// the raw type) for any unknown/future type.
+const RUN_TYPE_NAMES = { lsd: 'LSD', easy: '이지런', tempo: '템포런', interval: '인터벌' };
+function runTypeLabel(type, runDef) {
+  if (RUN_TYPE_NAMES[type]) return RUN_TYPE_NAMES[type];
+  if (runDef && runDef.name) return runDef.name;
+  return type == null ? '' : String(type);
+}
+
 function splitName(splitId) {
   const split = getSplitPersisted(splitId);
   return split ? split.name : '알 수 없음';
@@ -399,10 +408,18 @@ function strengthExerciseMarkup(ex) {
 }
 
 function runningMarkup(splitId) {
+  const lsd = getRunPersisted('lsd', splitId) || {};
   const easy = getRunPersisted('easy', splitId) || {};
+  const tempo = getRunPersisted('tempo', splitId) || {};
   const interval = getRunPersisted('interval', splitId) || {};
+  const lsdLine = lsd.distanceMinKm != null
+    ? `<p class="muted">LSD ${lsd.distanceMinKm}~${lsd.distanceMaxKm}km · ${formatPace(lsd.paceMinSecPerKm)}~${formatPace(lsd.paceMaxSecPerKm)}/km · ${esc(lsd.note)}</p>`
+    : '';
   const easyLine = easy.distanceMinKm != null
     ? `<p class="muted">이지런 ${easy.distanceMinKm}~${easy.distanceMaxKm}km · ${formatPace(easy.paceMinSecPerKm)}~${formatPace(easy.paceMaxSecPerKm)}/km · ${esc(easy.note)}</p>`
+    : '';
+  const tempoLine = tempo.distanceMinKm != null
+    ? `<p class="muted">템포런 ${tempo.distanceMinKm}~${tempo.distanceMaxKm}km · ${formatPace(tempo.paceMinSecPerKm)}~${formatPace(tempo.paceMaxSecPerKm)}/km · ${esc(tempo.note)}</p>`
     : '';
   const intervalLine = interval.distanceMinKm != null
     ? `<p class="muted">인터벌 ${interval.distanceMinKm}~${interval.distanceMaxKm}km · 반복 구간 ${formatPace(interval.paceMinSecPerKm)}~${formatPace(interval.paceMaxSecPerKm)}/km</p>`
@@ -410,12 +427,16 @@ function runningMarkup(splitId) {
   return `
     <div class="card exercise" data-run="true">
       <h3>러닝</h3>
+      ${lsdLine}
       ${easyLine}
+      ${tempoLine}
       ${intervalLine}
       <label class="field field--block">
         <span class="field-label">유형</span>
         <select class="input-run-type">
+          <option value="lsd">LSD</option>
           <option value="easy">이지런 (조깅)</option>
+          <option value="tempo">템포런</option>
           <option value="interval">인터벌</option>
         </select>
       </label>
@@ -762,7 +783,7 @@ function sessionSummaryMarkup(session) {
     const evalLine = evalRes
       ? `<span class="${paceStatusClass(evalRes.result)}">${esc(evalRes.message)}</span>`
       : '';
-    const typeLabel = isInterval ? '인터벌' : '이지런';
+    const typeLabel = runTypeLabel(session.run.type, runDef);
     const repPart = isInterval && typeof session.run.repPaceSecPerKm === 'number'
       ? ` · 반복 구간 ${formatPace(session.run.repPaceSecPerKm)}/km`
       : '';
@@ -1073,7 +1094,9 @@ function reindexEditSets(setsEl) {
 const TREND_METRIC = {
   TOP_WEIGHT: 'top_weight',
   VOLUME: 'volume',
+  PACE_LSD: 'pace_lsd',
   PACE_EASY: 'pace_easy',
+  PACE_TEMPO: 'pace_tempo',
   PACE_INTERVAL: 'pace_interval',
 };
 
@@ -1093,7 +1116,9 @@ function trendOptions() {
         });
       });
     } else if (split.type === 'running') {
+      opts.push({ value: `${TREND_METRIC.PACE_LSD}:run`, label: '러닝 · LSD 평균 페이스' });
       opts.push({ value: `${TREND_METRIC.PACE_EASY}:run`, label: '러닝 · 이지런 평균 페이스' });
+      opts.push({ value: `${TREND_METRIC.PACE_TEMPO}:run`, label: '러닝 · 템포런 평균 페이스' });
       opts.push({ value: `${TREND_METRIC.PACE_INTERVAL}:run`, label: '러닝 · 인터벌 반복 구간 페이스' });
     }
   });
@@ -1205,8 +1230,14 @@ function renderTrendChart(container, selection) {
     return;
   }
 
-  if (metric === TREND_METRIC.PACE_EASY || metric === TREND_METRIC.PACE_INTERVAL) {
-    const runType = metric === TREND_METRIC.PACE_EASY ? 'easy' : 'interval';
+  const PACE_METRIC_MAP = {
+    [TREND_METRIC.PACE_LSD]: { runType: 'lsd', title: 'LSD 평균 페이스' },
+    [TREND_METRIC.PACE_EASY]: { runType: 'easy', title: '이지런 평균 페이스' },
+    [TREND_METRIC.PACE_TEMPO]: { runType: 'tempo', title: '템포런 평균 페이스' },
+    [TREND_METRIC.PACE_INTERVAL]: { runType: 'interval', title: '인터벌 반복 구간 페이스' },
+  };
+  if (PACE_METRIC_MAP[metric]) {
+    const { runType, title } = PACE_METRIC_MAP[metric];
     const runDef = getRunPersisted(runType);
     const points = pacePoints(runType);
     const fmt = (v) => `${formatPace(v)}/km`;
@@ -1214,7 +1245,7 @@ function renderTrendChart(container, selection) {
       ? { min: runDef.paceMinSecPerKm, max: runDef.paceMaxSecPerKm }
       : null;
     const chart = lineChartSvg(points, {
-      title: `${runType === 'easy' ? '이지런 평균 페이스' : '인터벌 반복 구간 페이스'} 추이`,
+      title: `${title} 추이`,
       formatValue: fmt,
       band,
     });
@@ -1395,15 +1426,23 @@ function routineExerciseRowMarkup(ex) {
 
 // Markup for the running split's read-only run definitions.
 function routineRunningMarkup(split) {
+  const lsd = split.runs && split.runs.lsd;
   const easy = split.runs && split.runs.easy;
+  const tempo = split.runs && split.runs.tempo;
   const interval = split.runs && split.runs.interval;
+  const lsdLine = lsd
+    ? `<p class="muted">LSD ${esc(lsd.distanceMinKm)}~${esc(lsd.distanceMaxKm)}km · ${formatPace(lsd.paceMinSecPerKm)}~${formatPace(lsd.paceMaxSecPerKm)}/km</p>`
+    : '';
   const easyLine = easy
     ? `<p class="muted">이지런 ${esc(easy.distanceMinKm)}~${esc(easy.distanceMaxKm)}km · ${formatPace(easy.paceMinSecPerKm)}~${formatPace(easy.paceMaxSecPerKm)}/km</p>`
+    : '';
+  const tempoLine = tempo
+    ? `<p class="muted">템포런 ${esc(tempo.distanceMinKm)}~${esc(tempo.distanceMaxKm)}km · ${formatPace(tempo.paceMinSecPerKm)}~${formatPace(tempo.paceMaxSecPerKm)}/km</p>`
     : '';
   const intervalLine = interval
     ? `<p class="muted">인터벌 ${esc(interval.distanceMinKm)}~${esc(interval.distanceMaxKm)}km · 반복 구간 ${formatPace(interval.paceMinSecPerKm)}~${formatPace(interval.paceMaxSecPerKm)}/km</p>`
     : '';
-  return `<div class="routine-running">${easyLine}${intervalLine}<p class="muted routine-running-note">러닝 목표는 읽기 전용입니다.</p></div>`;
+  return `<div class="routine-running">${lsdLine}${easyLine}${tempoLine}${intervalLine}<p class="muted routine-running-note">러닝 목표는 읽기 전용입니다.</p></div>`;
 }
 
 // The add/edit exercise form fields. `values` pre-fills; `mode` = 'add'|'edit'.

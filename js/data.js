@@ -23,8 +23,8 @@ export const SPLITS = {
     name: '등·가슴',
     type: 'strength',
     exercises: [
-      { id: 'pullup_12kg', name: '12kg 풀업', defaultWeightKg: 12, repMin: 6, repMax: 10, sets: 4, perLeg: false },
-      { id: 'ringdips_12kg', name: '12kg 링딥스', defaultWeightKg: 12, repMin: 6, repMax: 10, sets: 4, perLeg: false },
+      { id: 'pullup_12kg', name: '중량 풀업', defaultWeightKg: 12, repMin: 6, repMax: 10, sets: 4, perLeg: false },
+      { id: 'ringdips_12kg', name: '중량 링딥스', defaultWeightKg: 12, repMin: 6, repMax: 10, sets: 4, perLeg: false },
       { id: 'pullup_bw', name: '맨몸 풀업', defaultWeightKg: 0, repMin: 8, repMax: 12, sets: 3, perLeg: false },
       { id: 'ringdips_bw', name: '맨몸 링딥스', defaultWeightKg: 0, repMin: 8, repMax: 12, sets: 3, perLeg: false },
     ],
@@ -34,10 +34,10 @@ export const SPLITS = {
     name: '어깨·하체·복근',
     type: 'strength',
     exercises: [
-      { id: 'backsquat_40kg', name: '40kg 백스쿼트', defaultWeightKg: 40, repMin: 10, repMax: 15, sets: 4, perLeg: false },
+      { id: 'backsquat_40kg', name: '백스쿼트', defaultWeightKg: 40, repMin: 10, repMax: 15, sets: 4, perLeg: false },
       // NOTE: user changed OHP from 3 to 4 sets.
-      { id: 'ohp_40kg', name: '40kg OHP', defaultWeightKg: 40, repMin: 8, repMax: 12, sets: 4, perLeg: false },
-      { id: 'lunge_40kg', name: '40kg 런지', defaultWeightKg: 40, repMin: 8, repMax: 12, sets: 3, perLeg: true },
+      { id: 'ohp_40kg', name: 'OHP', defaultWeightKg: 40, repMin: 8, repMax: 12, sets: 4, perLeg: false },
+      { id: 'lunge_40kg', name: '런지', defaultWeightKg: 40, repMin: 8, repMax: 12, sets: 3, perLeg: true },
       { id: 'lateral_raise', name: '사이드 레터럴 레이즈', defaultWeightKg: 0, repMin: 12, repMax: 15, sets: 3, perLeg: false },
       { id: 'hanging_leg_raise', name: '행잉 레그레이즈', defaultWeightKg: 0, repMin: 10, repMax: 15, sets: 3, perLeg: false },
     ],
@@ -78,6 +78,28 @@ export const SPLITS = {
         // Marks that the pace band applies to the rep segment, not the whole run.
         paceAppliesTo: 'rep_segment',
         note: '반복 구간 페이스 (웜업 1.5km + 1km x4 + 회복 조깅 + 쿨다운)',
+      },
+      lsd: {
+        id: 'run_lsd',
+        name: 'LSD',
+        type: 'lsd',
+        distanceMinKm: 10,
+        distanceMaxKm: 15,
+        // 6:40/km = 400s, 7:20/km = 440s
+        paceMinSecPerKm: 400,
+        paceMaxSecPerKm: 440,
+        note: '천천히 오래 (LSD)',
+      },
+      tempo: {
+        id: 'run_tempo',
+        name: '템포런',
+        type: 'tempo',
+        distanceMinKm: 6,
+        distanceMaxKm: 10,
+        // 5:30/km = 330s, 5:50/km = 350s
+        paceMinSecPerKm: 330,
+        paceMaxSecPerKm: 350,
+        note: '지속주 (템포)',
       },
     },
   },
