@@ -43,6 +43,26 @@ import {
   PACE_RESULT,
 } from './progression.js';
 import { lineChartSvg, barChartSvg, trendDirection, EMPTY_STATE_TEXT } from './charts.js';
+import {
+  qualifyingStreak,
+  proposeTargetChange,
+  detectPlateau,
+  computeWeeklyReview,
+  QUALIFYING_WINDOW,
+} from './coaching.js';
+
+// In-memory dismissal registry for advisory coaching cards.
+//
+// The user can tap [나중에] / [유지] to dismiss a proposal/deload card without
+// mutating the routine. We keep dismissals IN MEMORY (a module-level Set keyed
+// by exercise id + card kind) rather than persisting them: this needs NO
+// storage schema change and keeps backups/isValidBackup untouched. Dismissals
+// are intentionally re-evaluated on reload — reopening the app surfaces the
+// suggestion again, which is desirable for advisory (non-destructive) coaching.
+const dismissedCoaching = new Set();
+function coachingDismissKey(exId, kind) {
+  return `${exId}:${kind}`;
+}
 
 // --- Small formatting / DOM helpers -----------------------------------------
 
@@ -179,6 +199,146 @@ function lastTwoEntriesFor(exerciseId) {
   return all.slice(-2).map((s) => s.entries);
 }
 
+// Collect the FULL session history's set-entries for an exercise
+// (oldest→newest). The coaching functions (qualifyingStreak / proposeTargetChange
+// / detectPlateau) need the multi-session window, not just the last two.
+function allEntriesFor(exerciseId) {
+  return getSessionsForExercise(exerciseId).map((s) => s.entries);
+}
+
+// Format a target line like "12kg · 6~10회 × 4세트" from an exercise-shaped
+// object ({defaultWeightKg, repMin, repMax, sets}).
+function coachingTargetText(t) {
+  const weightPart = t.defaultWeightKg > 0 ? `${t.defaultWeightKg}kg · ` : '맨몸 · ';
+  return `${weightPart}${t.repMin}~${t.repMax}회 × ${t.sets}세트`;
+}
+
+// Build the 목표 상향 제안 / 정체 감지 advisory card(s) for a strength exercise.
+// Returns an HTML string (possibly empty). No card when nothing is actionable.
+// An exercise can never be both qualified and plateaued at once (opposite
+// conditions), but we render defensively so only the relevant card appears.
+function coachingCardsMarkup(ex) {
+  const entries = allEntriesFor(ex.id);
+  let html = '';
+
+  // (1) Goal-up proposal.
+  const proposal = proposeTargetChange(ex, entries);
+  if (proposal.qualified && !dismissedCoaching.has(coachingDismissKey(ex.id, 'goalup'))) {
+    const currentText = coachingTargetText(proposal.current);
+    const proposedText = coachingTargetText(proposal.proposed);
+    let deltaText;
+    if (proposal.kind === 'weight') {
+      const delta = proposal.proposed.defaultWeightKg - proposal.current.defaultWeightKg;
+      deltaText = `+${delta}kg`;
+    } else {
+      const delta = proposal.proposed.repMax - proposal.current.repMax;
+      deltaText = `+${delta}회`;
+    }
+    html += `
+      <div class="coaching-card coaching-goalup" data-coaching="goalup">
+        <p class="coaching-title status-ok">⬆ 목표 상향 제안</p>
+        <p class="coaching-line"><span class="muted">현재 목표</span> ${esc(currentText)}</p>
+        <p class="coaching-line"><span class="muted">제안</span> ${esc(proposedText)} <strong>(${esc(deltaText)})</strong></p>
+        <p class="coaching-reason muted">${esc(proposal.reason)}</p>
+        <div class="coaching-actions">
+          <button type="button" class="btn btn-primary coaching-apply">적용</button>
+          <button type="button" class="btn coaching-dismiss">나중에</button>
+        </div>
+      </div>`;
+  } else if (!proposal.qualified && proposal.streak > 0) {
+    // Partial progress hint like "증량 제안까지 2/3".
+    html += `
+      <p class="coaching-progress muted">증량 제안까지 ${esc(proposal.streak)}/${esc(proposal.required || QUALIFYING_WINDOW)} · 다음 달성 시 상향 제안</p>`;
+  }
+
+  // (2) Plateau / deload suggestion.
+  const plateau = detectPlateau(ex, entries);
+  if (plateau.plateaued && !dismissedCoaching.has(coachingDismissKey(ex.id, 'deload'))) {
+    const s = plateau.suggestion;
+    let changeText;
+    if (s.kind === 'deload_weight') {
+      changeText = `무게 ${ex.defaultWeightKg}kg → ${s.patch.defaultWeightKg}kg`;
+    } else {
+      changeText = `세트 ${ex.sets} → ${s.patch.sets}`;
+    }
+    html += `
+      <div class="coaching-card coaching-deload" data-coaching="deload">
+        <p class="coaching-title status-warn">⚠ 정체 감지</p>
+        <p class="coaching-line"><span class="muted">최근 ${esc(plateau.streak)}회 상한 미달</span> · 디로드 제안 ${esc(changeText)}</p>
+        <p class="coaching-reason muted">${esc(s.reason)}</p>
+        <div class="coaching-actions">
+          <button type="button" class="btn btn-primary coaching-deload-apply">디로드 적용</button>
+          <button type="button" class="btn coaching-deload-dismiss">유지</button>
+        </div>
+      </div>`;
+  }
+
+  return html;
+}
+
+// Wire the advisory coaching card buttons for one strength exercise card.
+// [적용]/[디로드 적용] mutate the routine via storage.updateExercise (the ONLY
+// place a coaching suggestion changes real data), then re-render every view so
+// the new target pre-fills. [나중에]/[유지] dismiss in-memory only (no mutation).
+//
+// After [적용] raises the target, the same past sessions no longer meet the new
+// upper target, so proposeTargetChange returns qualified:false and the card
+// naturally clears on re-render without any persisted dismissal.
+function wireCoachingCards(card, ex, splitId) {
+  const goalCard = card.querySelector('[data-coaching="goalup"]');
+  if (goalCard) {
+    const applyBtn = goalCard.querySelector('.coaching-apply');
+    const dismissBtn = goalCard.querySelector('.coaching-dismiss');
+    if (applyBtn) {
+      applyBtn.addEventListener('click', () => {
+        const proposal = proposeTargetChange(ex, allEntriesFor(ex.id));
+        if (proposal.qualified) {
+          updateExercise(splitId, ex.id, proposal.patch);
+          // Dismiss in-memory so the same historical data does not immediately
+          // re-propose another increase; the suggestion re-evaluates once new
+          // sessions are logged at the raised target (or on reload).
+          dismissedCoaching.add(coachingDismissKey(ex.id, 'goalup'));
+          renderToday();
+          renderRoutine();
+          renderTrends();
+        }
+      });
+    }
+    if (dismissBtn) {
+      dismissBtn.addEventListener('click', () => {
+        dismissedCoaching.add(coachingDismissKey(ex.id, 'goalup'));
+        goalCard.remove();
+      });
+    }
+  }
+
+  const deloadCard = card.querySelector('[data-coaching="deload"]');
+  if (deloadCard) {
+    const applyBtn = deloadCard.querySelector('.coaching-deload-apply');
+    const dismissBtn = deloadCard.querySelector('.coaching-deload-dismiss');
+    if (applyBtn) {
+      applyBtn.addEventListener('click', () => {
+        const plateau = detectPlateau(ex, allEntriesFor(ex.id));
+        if (plateau.plateaued) {
+          updateExercise(splitId, ex.id, plateau.suggestion.patch);
+          // Dismiss in-memory so the deload card clears after applying; it
+          // re-evaluates once new sessions are logged (or on reload).
+          dismissedCoaching.add(coachingDismissKey(ex.id, 'deload'));
+          renderToday();
+          renderRoutine();
+          renderTrends();
+        }
+      });
+    }
+    if (dismissBtn) {
+      dismissBtn.addEventListener('click', () => {
+        dismissedCoaching.add(coachingDismissKey(ex.id, 'deload'));
+        deloadCard.remove();
+      });
+    }
+  }
+}
+
 // Render a suggestion banner (weight/rep increase) or the hold note.
 function suggestionMarkup(ex) {
   const lastTwo = lastTwoEntriesFor(ex.id);
@@ -221,6 +381,7 @@ function strengthExerciseMarkup(ex) {
       <h3>${esc(ex.name)}</h3>
       <p class="muted target">${esc(targetLabel(ex))}</p>
       ${suggestionMarkup(ex)}
+      ${coachingCardsMarkup(ex)}
       <div class="sets">${rows}</div>
       <div class="set-actions">
         <button type="button" class="btn set-add">+ 세트 추가</button>
@@ -452,6 +613,9 @@ function wireTodayEvents(view, split) {
 
       // Live goal-vs-actual on any input change.
       card.addEventListener('input', () => refreshGoalActual(card, ex));
+
+      // Advisory coaching cards: [적용]/[나중에] and [디로드 적용]/[유지].
+      wireCoachingCards(card, ex, split.id);
 
       // Add a set row.
       const setsEl = card.querySelector('.sets');
@@ -1059,6 +1223,102 @@ function renderTrendChart(container, selection) {
   container.innerHTML = `<p class="chart-empty muted">${esc(EMPTY_STATE_TEXT)}</p>`;
 }
 
+// Format a signed second delta as a readable pace-change phrase. Negative =
+// faster (개선). Returns e.g. "12초 빨라짐" / "8초 느려짐" / "변화 없음".
+function paceDeltaText(deltaSec) {
+  if (deltaSec == null) return null;
+  const abs = Math.abs(Math.round(deltaSec));
+  if (abs === 0) return '변화 없음';
+  return deltaSec < 0 ? `${abs}초 빨라짐` : `${abs}초 느려짐`;
+}
+
+// Build a '다음 주 추천' hint that also folds in pending goal-up progress across
+// strength exercises (e.g. '풀업 증량 대기 2/3'). Falls back to the review's own
+// nextWeekHint when no proposal is mid-progress.
+function pendingProposalHint() {
+  const parts = [];
+  getSplitsPersisted().forEach((split) => {
+    if (split.type !== 'strength') return;
+    (split.exercises || []).forEach((ex) => {
+      const res = proposeTargetChange(ex, allEntriesFor(ex.id));
+      if (res.qualified) {
+        parts.push(`${ex.name} 상향 제안 대기`);
+      } else if (res.streak > 0) {
+        parts.push(`${ex.name} 증량 대기 ${res.streak}/${res.required || QUALIFYING_WINDOW}`);
+      }
+    });
+  });
+  return parts;
+}
+
+// Weekly-review summary card markup for the TOP of the 추이 view.
+function weeklyReviewMarkup() {
+  let review;
+  try {
+    review = computeWeeklyReview(getAllSessions());
+  } catch (err) {
+    review = { hasData: false };
+  }
+
+  if (!review.hasData) {
+    return `
+      <div class="card weekly-review">
+        <h2>주간 리뷰 요약</h2>
+        <p class="muted">아직 이번 주 훈련 데이터가 없습니다. '오늘 훈련'에서 세션을 기록하면 주간 리뷰가 표시됩니다.</p>
+      </div>`;
+  }
+
+  // 볼륨 변화 (▲/▼ %) — handle the null (no previous-week base) case gracefully.
+  let volumeLine;
+  if (review.volumeChangePct == null) {
+    volumeLine = `<span class="muted">비교할 지난주 데이터가 없습니다</span>`;
+  } else if (review.volumeChangePct > 0) {
+    volumeLine = `<span class="status-ok">▲ ${review.volumeChangePct}%</span>`;
+  } else if (review.volumeChangePct < 0) {
+    volumeLine = `<span class="status-warn">▼ ${Math.abs(review.volumeChangePct)}%</span>`;
+  } else {
+    volumeLine = `<span class="muted">■ 0%</span>`;
+  }
+
+  // PR 갱신.
+  const prLine = review.prs.length
+    ? review.prs
+        .map((pr) => {
+          const kindLabel = pr.kind === 'weight' ? `${pr.value}kg` : `${pr.value}회`;
+          return `${esc(pr.name)} (${esc(kindLabel)})`;
+        })
+        .join(', ')
+    : '없음';
+
+  // 러닝 페이스 변화 (faster = 개선).
+  const easyText = paceDeltaText(review.runningPace.easyDeltaSec);
+  const intervalText = paceDeltaText(review.runningPace.intervalDeltaSec);
+  const paceParts = [];
+  if (easyText) {
+    const cls = review.runningPace.easyDeltaSec < 0 ? 'status-ok' : review.runningPace.easyDeltaSec > 0 ? 'status-warn' : 'muted';
+    paceParts.push(`이지런 <span class="${cls}">${esc(easyText)}</span>`);
+  }
+  if (intervalText) {
+    const cls = review.runningPace.intervalDeltaSec < 0 ? 'status-ok' : review.runningPace.intervalDeltaSec > 0 ? 'status-warn' : 'muted';
+    paceParts.push(`인터벌 <span class="${cls}">${esc(intervalText)}</span>`);
+  }
+  const paceLine = paceParts.length ? paceParts.join(' · ') : '<span class="muted">비교할 러닝 데이터가 없습니다</span>';
+
+  // 다음 주 추천: prefer pending proposal progress, else the review hint.
+  const pending = pendingProposalHint();
+  const nextHint = pending.length ? pending.join(' · ') : review.nextWeekHint;
+
+  return `
+    <div class="card weekly-review">
+      <h2>주간 리뷰 요약</h2>
+      <div class="review-row"><span class="review-label muted">이번 주 운동 횟수</span><span class="review-value">${esc(review.sessionCount)}회</span></div>
+      <div class="review-row"><span class="review-label muted">PR 갱신</span><span class="review-value">${prLine}</span></div>
+      <div class="review-row"><span class="review-label muted">지난주 대비 총 볼륨</span><span class="review-value">${volumeLine}</span></div>
+      <div class="review-row"><span class="review-label muted">러닝 페이스 변화</span><span class="review-value">${paceLine}</span></div>
+      <div class="review-row review-hint"><span class="review-label muted">다음 주 추천</span><span class="review-value">${esc(nextHint)}</span></div>
+    </div>`;
+}
+
 function renderTrends() {
   const view = document.getElementById('view-trends');
   if (!view) return;
@@ -1069,6 +1329,7 @@ function renderTrends() {
     .join('');
 
   view.innerHTML = `
+    ${weeklyReviewMarkup()}
     <div class="card">
       <h2>추이</h2>
       <p class="muted">운동을 선택하면 기록된 세션의 추이를 보여줍니다. 세트 최고 중량과 총 볼륨, 러닝 평균 페이스를 확인할 수 있습니다.</p>

@@ -634,6 +634,86 @@ select {
   display: none;
 }
 
+/* 자동 코칭 (auto-coaching) advisory cards --------------------------------- */
+
+/* Goal-up / plateau cards nested inside an exercise card. Reuse the dark theme
+   surface with a colored accent border to read as an advisory suggestion. */
+.coaching-card {
+  margin: 10px 0;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.coaching-goalup {
+  border-color: var(--ok);
+  background: rgba(46, 160, 67, 0.12);
+}
+
+.coaching-deload {
+  border-color: var(--warn);
+  background: rgba(210, 153, 34, 0.12);
+}
+
+.coaching-title {
+  margin: 0 0 6px;
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.coaching-line {
+  margin: 2px 0;
+  font-size: 0.9rem;
+}
+
+.coaching-reason {
+  margin: 6px 0 8px;
+  font-size: 0.82rem;
+}
+
+.coaching-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.coaching-actions .btn {
+  flex: 1;
+}
+
+/* Partial-progress hint (e.g. "증량 제안까지 2/3"). */
+.coaching-progress {
+  margin: 8px 0;
+  font-size: 0.85rem;
+}
+
+/* 주간 리뷰 요약 card at the top of 추이. */
+.weekly-review .review-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.weekly-review .review-row:last-child {
+  border-bottom: none;
+}
+
+.weekly-review .review-label {
+  flex: 0 0 auto;
+}
+
+.weekly-review .review-value {
+  text-align: right;
+}
+
+.weekly-review .review-hint .review-value {
+  color: var(--accent-soft);
+}
+
 /* Wider screens: keep comfortable centered column */
 @media (min-width: 720px) {
   body {
