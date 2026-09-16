@@ -41,6 +41,17 @@ import { validateExerciseInput } from '../js/app.js';
 
 import { isValidBackup } from '../js/storage.js';
 
+import {
+  QUALIFYING_WINDOW,
+  PLATEAU_WINDOW,
+  DELOAD_WEIGHT_FACTOR,
+  qualifyingStreak,
+  proposeTargetChange,
+  detectPlateau,
+  computeWeeklyReview,
+  buildNextWeekHint,
+} from '../js/coaching.js';
+
 let passed = 0;
 function ok(label, fn) {
   try {
@@ -552,6 +563,214 @@ ok('the referentially-broken example from the review is rejected', () => {
     exerciseLibrary: [],
   };
   assert.equal(isValidBackup(broken), false);
+});
+
+console.log('coaching.js — constants');
+
+ok('exports the documented windows/constants', () => {
+  assert.equal(QUALIFYING_WINDOW, 3);
+  assert.equal(PLATEAU_WINDOW, 3);
+  assert.equal(DELOAD_WEIGHT_FACTOR, 0.9);
+});
+
+console.log('coaching.js — qualifyingStreak');
+
+// Reuse the weighted OHP fixtures (repMax 12, sets 4, 40kg) defined above.
+ok('qualifyingStreak counts consecutive upper-target sessions on a consistent load', () => {
+  const res = qualifyingStreak(ohp, [upperSets, upperSets, upperSets]);
+  assert.equal(res.streak, 3);
+  assert.equal(res.load, 40);
+});
+
+ok('qualifyingStreak stops at a non-qualifying session', () => {
+  // Most recent (last) is qualifying, but the middle failed -> only trailing run counts.
+  const res = qualifyingStreak(ohp, [upperSets, notUpperSets, upperSets]);
+  assert.equal(res.streak, 1);
+});
+
+ok('qualifyingStreak stops when the load is inconsistent within the run', () => {
+  // Three upper-target sessions but the earliest is at a lower load; only the
+  // trailing consistent-load run (2) qualifies for a weight bump.
+  const res = qualifyingStreak(ohp, [upperSetsLowLoad, upperSets, upperSets]);
+  assert.equal(res.streak, 2);
+  assert.equal(res.load, 40);
+});
+
+ok('qualifyingStreak is 0 for empty input', () => {
+  assert.equal(qualifyingStreak(ohp, []).streak, 0);
+  assert.equal(qualifyingStreak(ohp, null).streak, 0);
+});
+
+ok('qualifyingStreak counts bodyweight sessions with no load gate', () => {
+  const bw = getExercise('pullup_bw'); // sets 3, repMax 12, defaultWeightKg 0
+  const bwUpper = [{ reps: 12 }, { reps: 12 }, { reps: 12 }];
+  const res = qualifyingStreak(bw, [bwUpper, bwUpper, bwUpper]);
+  assert.equal(res.streak, 3);
+  assert.equal(res.load, null);
+});
+
+console.log('coaching.js — proposeTargetChange');
+
+ok('proposeTargetChange returns qualified:false with streak/required below the window', () => {
+  const res = proposeTargetChange(ohp, [upperSets, upperSets]);
+  assert.equal(res.qualified, false);
+  assert.equal(res.streak, 2);
+  assert.equal(res.required, 3);
+});
+
+ok('proposeTargetChange returns a weight proposal at/above the window (patch +2.5kg)', () => {
+  const res = proposeTargetChange(ohp, [upperSets, upperSets, upperSets]);
+  assert.equal(res.qualified, true);
+  assert.equal(res.kind, 'weight');
+  assert.equal(res.patch.defaultWeightKg, 40 + DEFAULT_WEIGHT_INCREMENT_KG); // 42.5
+  assert.equal(res.current.defaultWeightKg, 40);
+  assert.equal(res.proposed.defaultWeightKg, 42.5);
+});
+
+ok('proposeTargetChange returns a reps proposal for a bodyweight exercise', () => {
+  const bw = getExercise('pullup_bw'); // repMin 8, repMax 12
+  const bwUpper = [{ reps: 12 }, { reps: 12 }, { reps: 12 }];
+  const res = proposeTargetChange(bw, [bwUpper, bwUpper, bwUpper]);
+  assert.equal(res.qualified, true);
+  assert.equal(res.kind, 'reps');
+  assert.equal(res.patch.repMin, 9);
+  assert.equal(res.patch.repMax, 13);
+  assert.equal(res.proposed.repMax, 13);
+});
+
+console.log('coaching.js — detectPlateau');
+
+ok('detectPlateau returns plateaued:false below PLATEAU_WINDOW', () => {
+  const res = detectPlateau(ohp, [notUpperSets, notUpperSets]);
+  assert.equal(res.plateaued, false);
+  assert.equal(res.streak, 2);
+});
+
+ok('detectPlateau suggests a weight deload at/above the window (weighted)', () => {
+  const res = detectPlateau(ohp, [notUpperSets, notUpperSets, notUpperSets]);
+  assert.equal(res.plateaued, true);
+  assert.equal(res.streak, 3);
+  assert.equal(res.suggestion.kind, 'deload_weight');
+  // notUpperSets is logged at W (40) == ohp.defaultWeightKg, so the observed
+  // plateau load and the routine default coincide: 40 * 0.9 = 36 (0.5kg step).
+  assert.equal(res.suggestion.patch.defaultWeightKg, 36);
+  assert.equal(res.basisWeightKg, 40);
+});
+
+ok('detectPlateau deload is based on the OBSERVED plateau load, not defaultWeightKg', () => {
+  // User plateaued grinding at 50kg even though the routine default is 40kg.
+  const heavyNotUpper = [
+    { weightKg: 50, reps: 12 },
+    { weightKg: 50, reps: 11 },
+    { weightKg: 50, reps: 12 },
+    { weightKg: 50, reps: 12 },
+  ];
+  const res = detectPlateau(ohp, [heavyNotUpper, heavyNotUpper, heavyNotUpper]);
+  assert.equal(res.plateaued, true);
+  assert.equal(res.basisWeightKg, 50); // observed, not the 40kg default
+  // 50 * 0.9 = 45 (0.5kg step) — anchored to what was actually lifted.
+  assert.equal(res.suggestion.patch.defaultWeightKg, 45);
+});
+
+ok('detectPlateau falls back to defaultWeightKg when the plateau load drifts', () => {
+  // Inconsistent loads across the stagnant sessions -> no single observed load.
+  const s1 = [
+    { weightKg: 47.5, reps: 12 },
+    { weightKg: 47.5, reps: 11 },
+    { weightKg: 47.5, reps: 12 },
+    { weightKg: 47.5, reps: 12 },
+  ];
+  const s2 = [
+    { weightKg: 50, reps: 12 },
+    { weightKg: 50, reps: 11 },
+    { weightKg: 50, reps: 12 },
+    { weightKg: 50, reps: 12 },
+  ];
+  const res = detectPlateau(ohp, [s1, s2, s1]);
+  assert.equal(res.plateaued, true);
+  assert.equal(res.basisWeightKg, 40); // fell back to defaultWeightKg
+  assert.equal(res.suggestion.patch.defaultWeightKg, 36);
+});
+
+ok('detectPlateau suggests a set deload for a bodyweight exercise', () => {
+  const bw = getExercise('pullup_bw'); // sets 3, defaultWeightKg 0
+  const bwLow = [{ reps: 8 }, { reps: 8 }, { reps: 8 }];
+  const res = detectPlateau(bw, [bwLow, bwLow, bwLow]);
+  assert.equal(res.plateaued, true);
+  assert.equal(res.suggestion.kind, 'deload_sets');
+  assert.equal(res.suggestion.patch.sets, 2);
+});
+
+console.log('coaching.js — computeWeeklyReview');
+
+ok('computeWeeklyReview returns hasData:false for empty input', () => {
+  const res = computeWeeklyReview([]);
+  assert.equal(res.hasData, false);
+  assert.equal(res.sessionCount, 0);
+  assert.equal(res.volumeChangePct, null);
+});
+
+ok('computeWeeklyReview counts sessions in the rolling 7-day window', () => {
+  const sessions = [
+    { date: '2024-01-01', splitId: 'chest_back', entriesByExercise: { a: [{ reps: 10 }] } },
+    { date: '2024-01-05', splitId: 'chest_back', entriesByExercise: { a: [{ reps: 10 }] } },
+    { date: '2024-01-07', splitId: 'chest_back', entriesByExercise: { a: [{ reps: 10 }] } },
+  ];
+  // anchor = 2024-01-07; window = [2024-01-01, 2024-01-07] -> all 3.
+  const res = computeWeeklyReview(sessions);
+  assert.equal(res.hasData, true);
+  assert.equal(res.sessionCount, 3);
+});
+
+ok('computeWeeklyReview computes volumeChangePct vs the previous week', () => {
+  const sessions = [
+    // previous week: [2024-01-01, 2024-01-07], anchor 2024-01-14.
+    { date: '2024-01-05', splitId: 'chest_back', entriesByExercise: { a: [{ reps: 10 }, { reps: 10 }] } }, // 20 reps
+    // this week: [2024-01-08, 2024-01-14].
+    { date: '2024-01-14', splitId: 'chest_back', entriesByExercise: { a: [{ reps: 10 }, { reps: 10 }, { reps: 10 }] } }, // 30 reps
+  ];
+  const res = computeWeeklyReview(sessions);
+  assert.equal(res.totalVolumeThisWeek, 30);
+  assert.equal(res.totalVolumePrevWeek, 20);
+  assert.equal(res.volumeChangePct, 50); // (30-20)/20*100
+});
+
+ok('computeWeeklyReview volumeChangePct is null when there is no previous week', () => {
+  const sessions = [
+    { date: '2024-02-01', splitId: 'chest_back', entriesByExercise: { a: [{ reps: 10 }] } },
+  ];
+  const res = computeWeeklyReview(sessions);
+  assert.equal(res.volumeChangePct, null);
+});
+
+ok('computeWeeklyReview detects a weight PR vs earlier sessions', () => {
+  const sessions = [
+    // Earlier baseline (before this week's window): max 40kg.
+    { date: '2024-01-01', splitId: 'shoulder_legs_abs', entriesByExercise: { ohp_40kg: [{ weightKg: 40, reps: 8 }] }, exerciseNames: { ohp_40kg: '40kg OHP' } },
+    // This week (anchor 2024-01-14): new max 42.5kg.
+    { date: '2024-01-14', splitId: 'shoulder_legs_abs', entriesByExercise: { ohp_40kg: [{ weightKg: 42.5, reps: 8 }] }, exerciseNames: { ohp_40kg: '40kg OHP' } },
+  ];
+  const res = computeWeeklyReview(sessions);
+  assert.ok(res.prs.length >= 1);
+  const pr = res.prs.find((p) => p.exId === 'ohp_40kg');
+  assert.ok(pr);
+  assert.equal(pr.kind, 'weight');
+  assert.equal(pr.value, 42.5);
+  assert.equal(pr.name, '40kg OHP');
+});
+
+ok('computeWeeklyReview computes a running pace delta (negative = faster)', () => {
+  const sessions = [
+    { date: '2024-01-05', splitId: 'running', entriesByExercise: null, run: { type: 'easy', distanceKm: 5, paceSecPerKm: 400 } },
+    { date: '2024-01-14', splitId: 'running', entriesByExercise: null, run: { type: 'easy', distanceKm: 5, paceSecPerKm: 385 } },
+  ];
+  const res = computeWeeklyReview(sessions);
+  assert.equal(res.runningPace.easyDeltaSec, -15); // faster by 15s/km
+});
+
+ok('buildNextWeekHint returns a non-empty Korean hint', () => {
+  assert.ok(buildNextWeekHint({ sessionCount: 0 }).length > 0);
+  assert.ok(buildNextWeekHint({ sessionCount: 2, prs: [{ exId: 'x' }] }).length > 0);
 });
 
 console.log(`\nAll ${passed} assertions passed.`);
